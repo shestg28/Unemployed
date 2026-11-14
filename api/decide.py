@@ -16,16 +16,21 @@ signals = {
                 "identity": {"status", "similarity"} | None},
                # challenge.identity = CompareFaces re-run on a good challenge
                # frame. In the challenge phase it REPLACES top-level identity.
-  "passive_allow_enabled": bool,
+  "passive_deny_enabled": bool,   # False (default): passive SPOOF is logged only
   "schedule":  {"status": "PERMITTED"|"PROHIBITED"|"APPROVAL_REQUIRED"|"UNKNOWN",
                 "policy_version": str|None} | None,   # evaluated at decision time
   "mode":      "ONLINE"|"OFFLINE",                     # anything else = OFFLINE
 }
 
-Order: SPOOF / ID_MISMATCH -> DENY; schedule PROHIBITED -> DENY (even with
-perfect biometrics); OFFLINE -> STAFF_VERIFY (never an automatic ALLOW);
-biometric result; a biometric ALLOW still needs schedule PERMITTED, else
-APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
+GATE (14 Nov, NO-GO on passive): genuine faces scored below the passive
+threshold 4/10 times, so passive can neither approve nor deny by default.
+
+Order: ID_MISMATCH -> DENY (and passive SPOOF -> DENY only if
+passive_deny_enabled); schedule PROHIBITED -> DENY; OFFLINE -> STAFF_VERIFY.
+Online first pass ALWAYS ends REQUEST_VERIFICATION + CHALLENGE (reason says why).
+The only automatic ALLOW: challenge PASS + challenge-frame identity MATCH +
+good, continuous quality + schedule PERMITTED. Challenge FAIL, UNCERTAIN or
+anything else -> RECEPTION. APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
 """
 from typing import Any
 
@@ -71,13 +76,21 @@ def _quality_problem(q: Any) -> Decision | None:
     return None
 
 
+def _passive_spoof(signals: dict) -> bool:
+    """Passive SPOOF anywhere -- counts only when PASSIVE_DENY_ENABLED is on."""
+    if signals.get("passive_deny_enabled") is not True:
+        return False
+    ch = signals.get("challenge")
+    return "SPOOF" in (_status(signals.get("passive")),
+                       _status(ch.get("passive")) if isinstance(ch, dict) else None,
+                       _status(signals.get("challenge_passive")))
+
+
 def _deny(signals: dict) -> Decision | None:
     """Hard negatives. Checked first in every phase; nothing overrides them."""
-    if _status(signals.get("passive")) == "SPOOF":
+    if _passive_spoof(signals):
         return DENY, "SPOOF_PASSIVE", "NONE"
     ch = signals.get("challenge")
-    if isinstance(ch, dict) and _status(ch.get("passive")) == "SPOOF":
-        return DENY, "SPOOF_PASSIVE", "NONE"
     # Identity in force: the challenge-frame result once a challenge ran.
     ident = ch.get("identity") if isinstance(ch, dict) else signals.get("identity")
     if _status(ident) == "MISMATCH" and _quality_ok(signals.get("quality")):
@@ -86,27 +99,21 @@ def _deny(signals: dict) -> Decision | None:
 
 
 def _first_pass(signals: dict) -> Decision:
+    """Never ALLOW. Always REQUEST_VERIFICATION + CHALLENGE; reason = most useful hint."""
     q = signals.get("quality")
     ident = signals.get("identity")
     passive = _status(signals.get("passive"))
 
     problem = _quality_problem(q)
     if problem:
-        return problem
+        return REQUEST, problem[1], "CHALLENGE"
     if ident is None:
-        return REQUEST, "TIMEOUT", "RETRY"
+        return REQUEST, "TIMEOUT", "CHALLENGE"
     if _status(ident) != "MATCH":
-        return REQUEST, "ID_UNAVAILABLE", "RETRY"
-    if passive == "UNCERTAIN":
-        return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"
-    if passive != "LIVE":  # UNAVAILABLE, missing, or unrecognised
-        return REQUEST, "LIVENESS_UNAVAILABLE", "RETRY"
-    if not (_quality_ok(q) and _continuity_ok(q)):  # quality UNAVAILABLE
-        return REQUEST, "MANUAL_REVIEW", "RETRY"
-    if signals.get("passive_allow_enabled") is not True:
-        return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"
-    # Whitelist: quality OK, continuity OK, MATCH, LIVE, flag on.
-    return ALLOW, "OK_LIVE_MATCH", "NONE"
+        return REQUEST, "ID_UNAVAILABLE", "CHALLENGE"
+    if passive not in ("LIVE", "UNCERTAIN", "SPOOF"):  # UNAVAILABLE / missing
+        return REQUEST, "LIVENESS_UNAVAILABLE", "CHALLENGE"
+    return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"  # challenge is always required
 
 
 def _after_challenge(signals: dict) -> Decision:
@@ -117,13 +124,14 @@ def _after_challenge(signals: dict) -> Decision:
         return REQUEST, "TIMEOUT", "RECEPTION"
     if _status(ch) == "FAIL":
         return REQUEST, "CHALLENGE_FAILED", "RECEPTION"
+    if _status(ch) != "PASS":  # UNCERTAIN / UNAVAILABLE / missing
+        return REQUEST, "MANUAL_REVIEW", "RECEPTION"
     if _status(ch.get("identity")) != "MATCH":  # UNKNOWN / missing
         return REQUEST, "ID_UNAVAILABLE", "RECEPTION"
-    if (_status(ch) == "PASS"
-            and _status(ch.get("passive")) == "LIVE"
-            and _quality_ok(q) and _continuity_ok(q)):
-        return ALLOW, "OK_LIVE_MATCH", "NONE"
-    return REQUEST, "MANUAL_REVIEW", "RECEPTION"
+    if not (_quality_ok(q) and _continuity_ok(q)):
+        return REQUEST, "MANUAL_REVIEW", "RECEPTION"
+    # Passive score is NOT required here (gate: it misses genuine faces).
+    return ALLOW, "OK_LIVE_MATCH", "NONE"
 
 
 def decide(signals: dict) -> Decision:
@@ -157,12 +165,14 @@ def decide_staff(signals: dict) -> Decision:
     """Staff decision after a physical ID check. Pure.
 
     signals = {"passive": first-pass passive, "challenge_passive": ... | None,
+               "passive_deny_enabled": bool,
                "schedule": evaluated NOW, "staff": {"approve", "id_checked", "reason"}}
-    Staff can never override SPOOF or a PROHIBITED schedule.
+    Staff can never override a PROHIBITED schedule, nor a passive SPOOF while
+    PASSIVE_DENY_ENABLED is on (when off, SPOOF is log-only, like everywhere else).
     """
     if not isinstance(signals, dict):
         return REQUEST, "MANUAL_REVIEW", "STAFF_VERIFY"
-    if "SPOOF" in (_status(signals.get("passive")), _status(signals.get("challenge_passive"))):
+    if _passive_spoof(signals):
         return DENY, "SPOOF_PASSIVE", "NONE"
     if _status(signals.get("schedule")) == "PROHIBITED":
         return DENY, "SCHEDULE_DENIED", "NONE"

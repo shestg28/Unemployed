@@ -149,6 +149,7 @@ def _decision_signals(q, p, ident, challenge=None, *, user_id: str) -> dict:
                     {"status": ident.get("identity"), "similarity": ident.get("similarity")},
         "challenge": challenge,
         "passive_allow_enabled": config.PASSIVE_ALLOW_ENABLED,
+        "passive_deny_enabled": config.PASSIVE_DENY_ENABLED,
     }
 
 
@@ -412,6 +413,7 @@ def staff_verify(attempt_id: str, body: StaffBody) -> dict:
             raise HTTPException(409, "blocked: attempt is %s (%s); staff cannot override"
                                 % (latest["decision"], latest["reason_code"]))
         sig = {"passive": at.passive, "challenge_passive": at.challenge_passive,
+               "passive_deny_enabled": config.PASSIVE_DENY_ENABLED,
                "schedule": schedule.evaluate(at.user_id, config.KIOSK_ZONE),
                "mode": mode.current(),
                "staff": {"approve": body.approve, "id_checked": body.id_checked,

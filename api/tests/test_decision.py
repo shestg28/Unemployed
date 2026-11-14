@@ -73,7 +73,8 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
                  {"ok": False, "fail_reason": "BLUR", "continuity_ok": True},
                  {"ok": True, "continuity_ok": False}, {"ok": True, "continuity_ok": None}]
     passives = [LIVE, None, {"status": "UNAVAILABLE", "score": None},
-                {"status": "UNCERTAIN", "score": 0.5}, {"status": "GARBAGE"}]
+                {"status": "UNCERTAIN", "score": 0.5}, {"status": "GARBAGE"},
+                {"status": "SPOOF", "score": 0.99}]  # SPOOF is log-only (deny flag off)
     identities = [MATCH, None, {"status": "UNKNOWN", "similarity": None},
                   {"status": "UNKNOWN", "similarity": 70.0}]
     flags = [True, False, None]
@@ -84,20 +85,28 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
             qualities, passives, identities, flags, schedules, modes):
         d = decide({"quality": q, "passive": p, "identity": i, "challenge": None,
                     "passive_allow_enabled": flag, "schedule": sc, "mode": md})
-        all_good = (q is GOOD_Q and p is LIVE and i is MATCH and flag is True
-                    and sc is PERMITTED and md == "ONLINE")
-        assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, sc, md, d)
+        # Gate: the first pass NEVER allows -- even with every signal perfect
+        # and PASSIVE_ALLOW_ENABLED on. Online it always asks for a challenge.
+        assert d[0] == "REQUEST_VERIFICATION", (q, p, i, flag, sc, md, d)
+        assert d[2] == ("CHALLENGE" if md == "ONLINE" else "STAFF_VERIFY"), d
         combos += 1
-    assert combos == 6 * 5 * 4 * 3 * 4 * 3
+    assert combos == 6 * 6 * 4 * 3 * 4 * 3
 
-    # Challenge phase: same rule.
-    for ch_status, ch_passive in itertools.product(
-            ["PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE", None], [LIVE, None, {"status": "UNAVAILABLE"}]):
+    # Challenge phase: ALLOW only with challenge PASS (+ MATCH, PERMITTED, ONLINE).
+    # The challenge-frame passive status does not matter either way.
+    for ch_status, ch_passive, sc, md in itertools.product(
+            ["PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE", None],
+            [LIVE, None, {"status": "UNAVAILABLE"}, {"status": "SPOOF"}],
+            [PERMITTED, None, {"status": "UNKNOWN"}, {"status": "APPROVAL_REQUIRED"}],
+            ["ONLINE", "OFFLINE"]):
         d = decide({"quality": GOOD_Q, "passive": {"status": "UNCERTAIN"}, "identity": MATCH,
                     "challenge": {"status": ch_status, "passive": ch_passive, "timed_out": False,
                                   "identity": MATCH},
-                    "passive_allow_enabled": True, **OK})
-        assert (d[0] == "ALLOW") == (ch_status == "PASS" and ch_passive is LIVE), d
+                    "passive_allow_enabled": True, "schedule": sc, "mode": md})
+        assert (d[0] == "ALLOW") == (ch_status == "PASS" and sc is PERMITTED
+                                      and md == "ONLINE"), d
+        if md == "ONLINE" and ch_status in ("FAIL", "UNCERTAIN"):
+            assert d[2] == "RECEPTION", d
 
     # Challenge phase uses the challenge-frame identity, not the first-pass one
     # (which may have been late/missing): MATCH -> ALLOW, UNKNOWN/missing ->
@@ -116,7 +125,7 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
 
     # The real STUBs (pipeline has no v2 functions yet) can never produce ALLOW.
     d = decide({"quality": signals._stub_quality([]), "passive": signals._stub_passive([]),
-                "identity": MATCH, "challenge": None, "passive_allow_enabled": True})
+                "identity": MATCH, "challenge": None, "passive_allow_enabled": True, **OK})
     assert d[0] != "ALLOW"
     ch = signals._stub_challenge([], [], 0, [])
     d = decide({"quality": GOOD_Q, "passive": LIVE, "identity": MATCH,
@@ -129,18 +138,21 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
 def test_b_late_result_is_ignored_and_attempts_are_isolated(client):
     a, b = _start(client), _start(client)
 
-    # A: identity arrives on time -> ALLOW. B gets nothing from A's result.
+    # A: identity arrives on time -> counted (first pass still asks for a
+    # challenge, per gate). B gets nothing from A's result.
     assert _identity(client, a).json()["identity"] == "MATCH"
     assert STORE.get(a).identity is not None
     assert STORE.get(b).identity is None
 
     ra = _liveness(client, a).json()
-    assert ra["decision"] == "ALLOW" and ra["attempt_id"] == a
+    assert (ra["decision"], ra["reason_code"], ra["next_action"]) == \
+        ("REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE")
+    assert ra["signals"]["identity"]["status"] == "MATCH" and ra["attempt_id"] == a
 
-    # B: no identity before the deadline -> not ALLOW, even though quality,
-    # passive and (A's) identity were all good.
+    # B: no identity before the deadline -> TIMEOUT, identity not counted.
     rb = _liveness(client, b).json()
     assert (rb["decision"], rb["reason_code"]) == ("REQUEST_VERIFICATION", "TIMEOUT")
+    assert rb["signals"]["identity"]["status"] == "UNKNOWN"
     assert rb["attempt_id"] == b
 
     # A MATCH for B that arrives late is logged, stored aside, never used.
@@ -162,12 +174,18 @@ def test_b_late_result_is_ignored_and_attempts_are_isolated(client):
 
 
 def test_c_passive_spoof_then_passed_challenge_is_deny(client, monkeypatch):
-    d = decide({"quality": GOOD_Q, "passive": {"status": "SPOOF", "score": 0.99},
-                "identity": MATCH, "passive_allow_enabled": True,
-                "challenge": {"status": "PASS", "passive": LIVE, "timed_out": False}})
-    assert d == ("DENY", "SPOOF_PASSIVE", "NONE")
+    # With PASSIVE_DENY_ENABLED on, a passive SPOOF then a passed challenge is DENY.
+    spoof_then_pass = {"quality": GOOD_Q, "passive": {"status": "SPOOF", "score": 0.99},
+                       "identity": MATCH, "passive_allow_enabled": True, **OK,
+                       "challenge": {"status": "PASS", "passive": LIVE, "timed_out": False,
+                                     "identity": MATCH}}
+    assert decide({**spoof_then_pass, "passive_deny_enabled": True}) == \
+        ("DENY", "SPOOF_PASSIVE", "NONE")
+    # Default (flag off, gate NO-GO): SPOOF is log-only, the challenge decides.
+    assert decide({**spoof_then_pass, "passive_deny_enabled": False})[0] == "ALLOW"
 
-    # Through the API: a SPOOF first pass is final and cannot be stepped up.
+    # Through the API with the flag on: SPOOF first pass is final, no step-up.
+    monkeypatch.setattr(config, "PASSIVE_DENY_ENABLED", True)
     monkeypatch.setattr(pipeline, "passive_liveness",
                         lambda f: {"status": "SPOOF", "score": 0.99, "per_frame": []}, raising=False)
     aid = _start(client)
@@ -177,10 +195,13 @@ def test_c_passive_spoof_then_passed_challenge_is_deny(client, monkeypatch):
 
 
 def test_d_perfect_biometrics_but_schedule_prohibited_is_deny(client, monkeypatch):
-    perfect = {"quality": GOOD_Q, "passive": LIVE, "identity": MATCH, "challenge": None,
-               "passive_allow_enabled": True, "mode": "ONLINE"}
+    perfect = {"quality": GOOD_Q, "passive": LIVE, "identity": MATCH,
+               "passive_allow_enabled": True, "mode": "ONLINE",
+               "challenge": {"status": "PASS", "passive": LIVE, "timed_out": False,
+                             "identity": MATCH}}
     assert decide({**perfect, "schedule": PERMITTED})[0] == "ALLOW"  # control
-    assert decide({**perfect, "schedule": {"status": "PROHIBITED", "policy_version": "t1"}})         == ("DENY", "SCHEDULE_DENIED", "NONE")
+    assert decide({**perfect, "schedule": {"status": "PROHIBITED", "policy_version": "t1"}}) \
+        == ("DENY", "SCHEDULE_DENIED", "NONE")
 
     # Through the API with the real schedule file + demo clock.
     assert client.post("/operator/clock", json={"iso_time": WED_1230}).json()["demo_clock"]
@@ -223,12 +244,14 @@ def test_e_offline_never_auto_allows_and_staff_cannot_override_spoof_or_schedule
         client, monkeypatch):
     perfect = {"quality": GOOD_Q, "passive": LIVE, "identity": MATCH, "challenge": None,
                "passive_allow_enabled": True, "schedule": PERMITTED}
-    assert decide({**perfect, "mode": "OFFLINE"}) ==         ("REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY")
+    assert decide({**perfect, "mode": "OFFLINE"}) == \
+        ("REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY")
     staff_ok = {"approve": True, "id_checked": True, "reason": "ID checked"}
+    on = {"passive_deny_enabled": True}  # staff can't override SPOOF while the flag is on
     assert decide_staff({"passive": {"status": "SPOOF"}, "schedule": PERMITTED,
-                         "staff": staff_ok})[0] == "DENY"
+                         "staff": staff_ok, **on})[0] == "DENY"
     assert decide_staff({"passive": LIVE, "challenge_passive": {"status": "SPOOF"},
-                         "schedule": PERMITTED, "staff": staff_ok})[0] == "DENY"
+                         "schedule": PERMITTED, "staff": staff_ok, **on})[0] == "DENY"
     assert decide_staff({"passive": LIVE, "schedule": {"status": "PROHIBITED"},
                          "staff": staff_ok}) == ("DENY", "SCHEDULE_DENIED", "NONE")
 
@@ -247,7 +270,8 @@ def test_e_offline_never_auto_allows_and_staff_cannot_override_spoof_or_schedule
     assert (r["decision"], r["reason_code"]) == ("ALLOW", "STAFF_VERIFIED")
     assert r["staff"]["method"] == "physical_id" and r["staff"]["operator_id"]
 
-    # Offline SPOOF -> DENY, and staff cannot override it.
+    # Offline SPOOF (deny flag on) -> DENY, and staff cannot override it.
+    monkeypatch.setattr(config, "PASSIVE_DENY_ENABLED", True)
     monkeypatch.setattr(pipeline, "passive_liveness",
                         lambda f: {"status": "SPOOF", "score": 0.99, "per_frame": []}, raising=False)
     aid = _start(client)
@@ -256,6 +280,7 @@ def test_e_offline_never_auto_allows_and_staff_cannot_override_spoof_or_schedule
     assert STORE.get(aid).staff_decision is None
 
     # PROHIBITED by the time staff decides -> DENY even with approve=true.
+    monkeypatch.setattr(config, "PASSIVE_DENY_ENABLED", False)
     monkeypatch.setattr(pipeline, "passive_liveness", lambda f: dict(LIVE, per_frame=[]),
                         raising=False)
     aid = _start(client)

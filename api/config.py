@@ -36,7 +36,10 @@ CHALLENGE_ACTIONS = ("SMILE", "OPEN_MOUTH", "TURN_LEFT", "TURN_RIGHT")
 # --- Decision gates ------------------------------------------------------------
 # Passive-only ALLOW is off unless explicitly enabled. Off -> a clean first
 # pass becomes REQUEST_VERIFICATION + CHALLENGE instead of ALLOW.
-PASSIVE_ALLOW_ENABLED = _flag("PASSIVE_ALLOW_ENABLED", False)
+PASSIVE_ALLOW_ENABLED = _flag("PASSIVE_ALLOW_ENABLED", False)  # gate: stays off; no effect
+# GATE NO-GO: genuine faces scored below threshold 4/10 times. Off -> passive
+# SPOOF never causes DENY; passive status/score are logged only.
+PASSIVE_DENY_ENABLED = _flag("PASSIVE_DENY_ENABLED", False)
 # detect_labels is a logged signal only; it never changes a decision.
 LABELS_SIGNAL_ENABLED = _flag("LABELS_SIGNAL_ENABLED", False)
 
