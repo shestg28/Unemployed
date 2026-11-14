@@ -11,17 +11,20 @@ import os
 import socket
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from pipeline import config as PC
 
 CACHE_S = 5.0
 CONNECT_TIMEOUT_S = 0.8
+HEALTH_BUDGET_S = 1.0   # whole check incl. DNS (getaddrinfo ignores socket timeouts)
+STALE_OK_S = 30.0       # decision path reuses a cached result up to this old
 
 _lock = threading.Lock()
 _state = {"mode": None, "checked": 0.0}
 _operator_force_offline = False
-_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="health")
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="health")
+_refreshing = threading.Lock()
 
 
 def _forced() -> bool:
@@ -43,9 +46,12 @@ def _reachable(host: str) -> bool:
 
 
 def health_ok() -> bool:
+    """Both endpoints reachable within HEALTH_BUDGET_S total (a hung DNS lookup = down)."""
     region = PC.AWS_REGION
     hosts = [f"rekognition.{region}.amazonaws.com", f"s3.{region}.amazonaws.com"]
-    return all(_pool.map(_reachable, hosts))
+    futs = [_pool.submit(_reachable, h) for h in hosts]
+    done, _ = wait(futs, timeout=HEALTH_BUDGET_S)
+    return len(done) == len(futs) and all(f.result() for f in futs)
 
 
 def refresh() -> str:
@@ -56,9 +62,22 @@ def refresh() -> str:
 
 
 def current() -> str:
+    """Never blocks a decision on the network once a result exists: the background
+    loop refreshes every 5 s; a result up to STALE_OK_S old is reused, and a stale
+    one triggers a non-blocking refresh. Only the very first call checks inline."""
     if _forced():
         return "OFFLINE"
     with _lock:
-        if _state["mode"] and time.monotonic() - _state["checked"] < CACHE_S:
-            return _state["mode"]
-    return refresh()
+        m, age = _state["mode"], time.monotonic() - _state["checked"]
+    if m and age < CACHE_S:
+        return m
+    if m and age < STALE_OK_S:
+        if _refreshing.acquire(blocking=False):
+            def _bg():
+                try:
+                    refresh()
+                finally:
+                    _refreshing.release()
+            _pool.submit(_bg)
+        return m
+    return refresh()  # no result yet, or too old to trust: check now (<= ~1 s)
