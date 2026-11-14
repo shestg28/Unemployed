@@ -4,12 +4,15 @@ Have Anil run the kiosk while Siddhant presents the approved props. Record the c
 
 | Prop | Planned | Observed | Challenge PASS | FAIL | UNCERTAIN | Not reached | Access granted |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Printed photo | 3 | — | — | — | — | — | — |
-| Phone photo | 3 | — | — | — | — | — | — |
-| Replay video | 2 | — | — | — | — | — | — |
-| Mask without cutouts | 1 | — | — | — | — | — | — |
-| Cutout mask | 1 | — | — | — | — | — | — |
-| **Total** | **10** | — | — | — | — | — | — |
+| Printed photo | 3 | 0 | — | — | — | — | — |
+| Phone photo | 3 | 3 | 0 | 0 | 3 | 0 | Unreported |
+| Replay video | 2 | 3 | 0 | 0 | 3 | 0 | Unreported |
+| Mask without cutouts | 1 | 0 | — | — | — | — | — |
+| Cutout mask | 1 | 0 | — | — | — | — | — | — |
+| Genuine control | 3 | 5 | 5 | 0 | 0 | 0 | Unreported |
+| **Total** | **13** | **11** | **5** | **0** | **6** | **0** | Unreported |
+
+Counts supplied by the tester and sent to Sidhant and Sonu in [issue #3](https://github.com/shestg28/Unemployed/issues/3). Source logs, per-attempt IDs and final kiosk access decisions have not been supplied. Prints and both masks were not tested because the props were unavailable. Replay and genuine totals exceeded the original plan. Optional big-screen and improvised-prop trials have no results yet and must be labeled separately.
 
 Copy these counts to the calibration slide after Anil’s run. The earlier 30-frame camera test measured the passive model, while this run measures the live challenge path. Report each with its own denominator.
 
