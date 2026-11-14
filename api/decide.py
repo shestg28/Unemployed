@@ -17,7 +17,15 @@ signals = {
                # challenge.identity = CompareFaces re-run on a good challenge
                # frame. In the challenge phase it REPLACES top-level identity.
   "passive_allow_enabled": bool,
+  "schedule":  {"status": "PERMITTED"|"PROHIBITED"|"APPROVAL_REQUIRED"|"UNKNOWN",
+                "policy_version": str|None} | None,   # evaluated at decision time
+  "mode":      "ONLINE"|"OFFLINE",                     # anything else = OFFLINE
 }
+
+Order: SPOOF / ID_MISMATCH -> DENY; schedule PROHIBITED -> DENY (even with
+perfect biometrics); OFFLINE -> STAFF_VERIFY (never an automatic ALLOW);
+biometric result; a biometric ALLOW still needs schedule PERMITTED, else
+APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
 """
 from typing import Any
 
@@ -125,11 +133,24 @@ def decide(signals: dict) -> Decision:
     denied = _deny(signals)
     if denied:
         return denied
+    sched = _status(signals.get("schedule"))
+    if sched == "PROHIBITED":
+        return DENY, "SCHEDULE_DENIED", "NONE"
+    if signals.get("mode") != "ONLINE":
+        return REQUEST, "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY"
     if signals.get("challenge") is not None:
         if not isinstance(signals["challenge"], dict):
             return REQUEST, "MANUAL_REVIEW", "RECEPTION"
-        return _after_challenge(signals)
-    return _first_pass(signals)
+        bio = _after_challenge(signals)
+    else:
+        bio = _first_pass(signals)
+    if bio[0] != ALLOW:
+        return bio
+    if sched == "PERMITTED":
+        return bio
+    if sched == "APPROVAL_REQUIRED":
+        return REQUEST, "SCHEDULE_APPROVAL_REQUIRED", "STAFF_VERIFY"
+    return REQUEST, "SCHEDULE_UNKNOWN", "STAFF_VERIFY"
 
 
 MESSAGES = {
@@ -148,10 +169,18 @@ MESSAGES = {
     "TIMEOUT": "That took too long. Please try again.",
     "CHALLENGE_FAILED": "Please see reception.",
     "MANUAL_REVIEW": "Please see reception.",
+    "SCHEDULE_DENIED": "Entry not permitted at this time.",
+    "SCHEDULE_APPROVAL_REQUIRED": "Staff approval needed for this time.",
+    "SCHEDULE_UNKNOWN": "Staff will verify your access.",
+    "OFFLINE_STAFF_REQUIRED": "Kiosk offline. Staff will verify your ID.",
+    "STAFF_VERIFIED": "Welcome. Verified by staff.",
+    "STAFF_REJECTED": "Entry denied by staff.",
 }
 
 
 def message_for(reason: str, next_action: str) -> str:
     if next_action == "RECEPTION":
         return "Please see reception."
+    if next_action == "STAFF_VERIFY" and reason not in MESSAGES:
+        return "Please wait for staff to verify your ID."
     return MESSAGES.get(reason, "Please try again.")

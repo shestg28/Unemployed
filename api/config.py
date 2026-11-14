@@ -51,3 +51,9 @@ MAX_FRAME_BYTES = 5 * 1024 * 1024  # Rekognition's image-bytes limit
 # --- Logging -------------------------------------------------------------------
 ATTEMPT_LOG_PATH = os.environ.get(
     "ATTEMPT_LOG_PATH", str(REPO_ROOT / "logs" / "attempts.jsonl"))
+
+# --- v3: schedule / kiosk ----------------------------------------------------------
+SCHEDULE_PATH = os.environ.get("SCHEDULE_PATH", str(REPO_ROOT / "data" / "schedule.json"))
+KIOSK_ZONE = os.environ.get("KIOSK_ZONE") or None   # None = don't check zone
+KIOSK_ID = os.environ.get("KIOSK_ID", "kiosk-01")
+DEMO_CLOCK_ENABLED = _flag("DEMO_CLOCK_ENABLED", True)

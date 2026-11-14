@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from . import config, identity, signals
+from . import config, identity, mode, schedule, signals
 from .attempt_log import late_result, write_decision
 from .decide import decide, message_for
 from .store import STORE, Attempt, identity_snapshot, now_ms
@@ -113,8 +113,11 @@ def _identity_view(ident: dict | None) -> dict:
             "similarity": ident.get("similarity"), "note": ident.get("note")}
 
 
-def _decision_signals(q, p, ident, challenge=None) -> dict:
+def _decision_signals(q, p, ident, challenge=None, *, user_id: str) -> dict:
+    """Schedule and mode are evaluated NOW, at the moment of the decision."""
     return {
+        "schedule": schedule.evaluate(user_id, config.KIOSK_ZONE),
+        "mode": mode.current(),
         "quality": q if isinstance(q, dict) and isinstance(q.get("ok"), bool) else None,
         "passive": p,
         "identity": None if ident is None else
@@ -124,11 +127,19 @@ def _decision_signals(q, p, ident, challenge=None) -> dict:
     }
 
 
+def _schedule_view(sig: dict) -> dict:
+    sc = sig.get("schedule") or {}
+    return {"status": sc.get("status", "UNKNOWN"), "policy_version": sc.get("policy_version")}
+
+
 def _log(at_id, user_id, scenario, phase, d, q, p, ident, stage, first_ms, total_ms,
-         challenge=None, labels=None):
+         challenge=None, labels=None, sig=None):
+    sig = sig or {}
     write_decision({
         "attempt_id": at_id, "user_id": user_id, "scenario": scenario, "phase": phase,
         "decision": d[0], "reason": d[1], "next_action": d[2],
+        "schedule": {**_schedule_view(sig), "note": (sig.get("schedule") or {}).get("note")},
+        "mode": sig.get("mode"), "demo_clock": schedule.override_active(),
         "scores": {
             "quality_ok": (q or {}).get("ok"),
             "continuity_ok": (q or {}).get("continuity_ok"),
@@ -179,10 +190,11 @@ def attempt_identity(attempt_id: str, frame: UploadFile = File(...),
     return {"identity": res["identity"], "similarity": res["similarity"], "ms": res["ms"]}
 
 
-def _first_pass_response(at: Attempt, d, q, p, ident, stage, first_ms) -> dict:
+def _first_pass_response(at: Attempt, d, q, p, ident, stage, first_ms, sig) -> dict:
     return {
         "decision": d[0], "reason_code": d[1], "message": message_for(d[1], d[2]),
         "next_action": d[2], "attempt_id": at.attempt_id,
+        "schedule": _schedule_view(sig), "mode": sig["mode"],
         "signals": {"quality": _quality_view(q),
                     "passive": {"status": (p or {}).get("status", "UNAVAILABLE"),
                                 "score": (p or {}).get("score")},
@@ -215,17 +227,18 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
             return at.decision
         t_dec = time.perf_counter()
         ident = identity_snapshot(at)  # on-time result only
-        d = decide(_decision_signals(q, p, ident))
+        sig = _decision_signals(q, p, ident, user_id=at.user_id)
+        d = decide(sig)
         stage["decide"] = int((time.perf_counter() - t_dec) * 1000)
         first_ms = now_ms() - at.server_t0_ms
         at.scenario, at.passive, at.quality = scenario, p, _quality_view(q)
         at.continuity_ok = (q or {}).get("continuity_ok")
         at.stage_ms = dict(stage)
-        mine = _first_pass_response(at, d, q, p, ident, stage, first_ms)
+        mine = _first_pass_response(at, d, q, p, ident, stage, first_ms, sig)
         resp = at.set_decision(mine)
     if resp is mine:  # only the request that actually decided logs it
         _log(at.attempt_id, at.user_id, scenario, "first_pass", d, q, p, ident, stage,
-             first_ms, first_ms, labels=_labels_result(labels_fut))
+             first_ms, first_ms, labels=_labels_result(labels_fut), sig=sig)
     return resp
 
 
@@ -306,20 +319,42 @@ def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
             return at.challenge_decision
         ident = ch_ident  # challenge-frame identity replaces the first-pass one
         t_dec = time.perf_counter()
-        d = decide(_decision_signals(q, at.passive, None, challenge))
+        sig = _decision_signals(q, at.passive, None, challenge, user_id=at.user_id)
+        d = decide(sig)
         stage = {"quality": int((t_q - t) * 1000), "passive": int((t_c - t_q) * 1000),
                  "identity_wait": int((t_id - t_c) * 1000),
                  "decide": int((time.perf_counter() - t_dec) * 1000)}
         first_ms = at.decision["first_pass_server_ms"]
         total_ms = now_ms() - at.server_t0_ms
-        resp = _first_pass_response(at, d, q, (ch.get("passive") or {}), ident, stage, first_ms)
+        resp = _first_pass_response(at, d, q, (ch.get("passive") or {}), ident, stage,
+                                    first_ms, sig)
         resp["total_ms"] = total_ms
         mine = resp
         resp = at.set_challenge_decision(mine)
     if resp is mine:
         _log(at.attempt_id, at.user_id, at.scenario, "challenge", d, q, ch.get("passive"),
-             ident, stage, first_ms, total_ms, challenge=challenge)
+             ident, stage, first_ms, total_ms, challenge=challenge, sig=sig)
     return resp
+
+
+# --- v3: operator demo clock ---------------------------------------------------------
+
+class ClockBody(BaseModel):
+    iso_time: str | None = None
+
+
+@app.post("/operator/clock")
+def operator_clock(body: ClockBody) -> dict:
+    """Demo-only clock override (Asia/Kolkata if no offset). null = real time."""
+    if not config.DEMO_CLOCK_ENABLED:
+        raise HTTPException(403, "demo clock disabled")
+    try:
+        schedule.set_override(body.iso_time)
+    except ValueError:
+        raise HTTPException(400, "iso_time must be ISO 8601, e.g. 2026-11-14T10:30:00")
+    log.warning("DEMO CLOCK %s", "set to " + body.iso_time if body.iso_time else "cleared")
+    return {"kiosk_time": schedule.now().isoformat(timespec="seconds"),
+            "demo_clock": schedule.override_active()}
 
 
 # --- v1: /verify (shape unchanged, routed through decide()) ----------------------
@@ -367,14 +402,15 @@ def verify(frames: list[UploadFile] = File(...), user_id: str = Form(...)) -> di
     finally:
         data.clear()  # kiosk keeps nothing
     t_dec = time.perf_counter()
-    d = decide(_decision_signals(q, p, ident))
+    sig = _decision_signals(q, p, ident, user_id=user_id)
+    d = decide(sig)
     stage["decide"] = int((time.perf_counter() - t_dec) * 1000)
     decision_ms = int((time.perf_counter() - t0) * 1000)
     sim = (ident or {}).get("similarity")
     q_ok = [f for f in (q or {}).get("per_frame", []) if isinstance(f, dict)]
     labels = _labels_result(labels_fut)
     _log(attempt_id, user_id, "verify_v1", "first_pass", d, q, p, ident, stage,
-         decision_ms, decision_ms, labels=labels)
+         decision_ms, decision_ms, labels=labels, sig=sig)
     return {
         "decision": d[0],
         "confidence": _v1_confidence(d, p, sim),
@@ -386,4 +422,6 @@ def verify(frames: list[UploadFile] = File(...), user_id: str = Form(...)) -> di
             "quality": round(sum(1 for f in q_ok if f.get("ok")) / len(q_ok), 4) if q_ok else 0.0,
             "similarity": round(float(sim or 0.0), 2),
         },
+        # v3 additive fields (v1 keys above unchanged)
+        "schedule": _schedule_view(sig), "mode": sig["mode"], "reason_detail": d[1],
     }

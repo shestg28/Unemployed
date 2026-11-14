@@ -1,11 +1,12 @@
-"""The three required safety tests for the v2 decision path."""
+"""Safety tests for the decision path: (a)(b)(c) v2, (d) schedule."""
+import json
 import itertools
 
 import pytest
 from fastapi.testclient import TestClient
 
 import pipeline
-from api import config, identity, signals
+from api import config, identity, mode, schedule, signals
 from api.decide import decide
 from api.main import app
 from api.store import STORE
@@ -13,6 +14,17 @@ from api.store import STORE
 GOOD_Q = {"ok": True, "fail_reason": None, "continuity_ok": True}
 LIVE = {"status": "LIVE", "score": 0.97}
 MATCH = {"status": "MATCH", "similarity": 98.0}
+PERMITTED = {"status": "PERMITTED", "policy_version": "t1"}
+OK = {"schedule": PERMITTED, "mode": "ONLINE"}  # schedule + mode that allow
+# Fictional test policy: u1 may enter Mon-Fri 09:00-18:00 IST, but a deny
+# window covers 12:00-13:00. 2026-11-18 is a Wednesday.
+POLICY = {"policy_version": "t1", "expires_utc": "2099-01-01T00:00:00Z",
+          "users": {"u1": {"zone": "LAB-1", "windows": [
+              {"days": ["MON", "TUE", "WED", "THU", "FRI"], "start": "09:00", "end": "18:00",
+               "effect": "allow"},
+              {"days": ["WED"], "start": "12:00", "end": "13:00", "effect": "deny"}]}}}
+WED_10 = "2026-11-18T10:00:00"
+WED_1230 = "2026-11-18T12:30:00"
 FRAME = b"\xff\xd8not-really-a-jpeg"
 
 
@@ -27,9 +39,16 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "passive_liveness", lambda f: dict(LIVE, per_frame=[]), raising=False)
     monkeypatch.setattr(identity, "compare", lambda uid, fr: {
         "identity": "MATCH", "similarity": 98.0, "ms": 5, "note": "fake"})
+    sched = tmp_path / "schedule.json"
+    sched.write_text(json.dumps(POLICY), encoding="utf-8")
+    monkeypatch.setattr(config, "SCHEDULE_PATH", str(sched))
+    monkeypatch.setattr(config, "KIOSK_ZONE", "LAB-1")
+    monkeypatch.setattr(mode, "current", lambda: "ONLINE")
+    schedule.set_override(WED_10)  # inside the allow window
     STORE.clear()
     yield TestClient(app)
     STORE.clear()
+    schedule.set_override(None)
 
 
 def _start(c, user="u1"):
@@ -56,14 +75,18 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     identities = [MATCH, None, {"status": "UNKNOWN", "similarity": None},
                   {"status": "UNKNOWN", "similarity": 70.0}]
     flags = [True, False, None]
+    schedules = [PERMITTED, None, {"status": "UNKNOWN"}, {"status": "APPROVAL_REQUIRED"}]
+    modes = ["ONLINE", None, "OFFLINE"]
     combos = 0
-    for q, p, i, flag in itertools.product(qualities, passives, identities, flags):
+    for q, p, i, flag, sc, md in itertools.product(
+            qualities, passives, identities, flags, schedules, modes):
         d = decide({"quality": q, "passive": p, "identity": i, "challenge": None,
-                    "passive_allow_enabled": flag})
-        all_good = q is GOOD_Q and p is LIVE and i is MATCH and flag is True
-        assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, d)
+                    "passive_allow_enabled": flag, "schedule": sc, "mode": md})
+        all_good = (q is GOOD_Q and p is LIVE and i is MATCH and flag is True
+                    and sc is PERMITTED and md == "ONLINE")
+        assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, sc, md, d)
         combos += 1
-    assert combos == 6 * 5 * 4 * 3
+    assert combos == 6 * 5 * 4 * 3 * 4 * 3
 
     # Challenge phase: same rule.
     for ch_status, ch_passive in itertools.product(
@@ -71,7 +94,7 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
         d = decide({"quality": GOOD_Q, "passive": {"status": "UNCERTAIN"}, "identity": MATCH,
                     "challenge": {"status": ch_status, "passive": ch_passive, "timed_out": False,
                                   "identity": MATCH},
-                    "passive_allow_enabled": True})
+                    "passive_allow_enabled": True, **OK})
         assert (d[0] == "ALLOW") == (ch_status == "PASS" and ch_passive is LIVE), d
 
     # Challenge phase uses the challenge-frame identity, not the first-pass one
@@ -79,7 +102,7 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     # RECEPTION, MISMATCH on good quality -> DENY.
     def _after(ch_ident):
         return decide({"quality": GOOD_Q, "passive": {"status": "UNCERTAIN"}, "identity": None,
-                       "passive_allow_enabled": False,
+                       "passive_allow_enabled": False, **OK,
                        "challenge": {"status": "PASS", "passive": LIVE, "timed_out": False,
                                      "identity": ch_ident}})
     assert [_after(i) for i in (MATCH, {"status": "UNKNOWN"}, None,
@@ -97,7 +120,7 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     d = decide({"quality": GOOD_Q, "passive": LIVE, "identity": MATCH,
                 "challenge": {"status": ch["status"], "passive": ch["passive"], "timed_out": False,
                               "identity": MATCH},
-                "passive_allow_enabled": True})
+                "passive_allow_enabled": True, **OK})
     assert d == ("REQUEST_VERIFICATION", "MANUAL_REVIEW", "RECEPTION")
 
 
@@ -149,3 +172,38 @@ def test_c_passive_spoof_then_passed_challenge_is_deny(client, monkeypatch):
     _identity(client, aid)
     assert _liveness(client, aid).json()["decision"] == "DENY"
     assert client.post(f"/attempt/{aid}/challenge/start").status_code == 409
+
+
+def test_d_perfect_biometrics_but_schedule_prohibited_is_deny(client, monkeypatch):
+    perfect = {"quality": GOOD_Q, "passive": LIVE, "identity": MATCH, "challenge": None,
+               "passive_allow_enabled": True, "mode": "ONLINE"}
+    assert decide({**perfect, "schedule": PERMITTED})[0] == "ALLOW"  # control
+    assert decide({**perfect, "schedule": {"status": "PROHIBITED", "policy_version": "t1"}})         == ("DENY", "SCHEDULE_DENIED", "NONE")
+
+    # Through the API with the real schedule file + demo clock.
+    assert client.post("/operator/clock", json={"iso_time": WED_1230}).json()["demo_clock"]
+    aid = _start(client)
+    _identity(client, aid)
+    r = _liveness(client, aid).json()
+    assert (r["decision"], r["reason_code"]) == ("DENY", "SCHEDULE_DENIED")
+    assert r["schedule"] == {"status": "PROHIBITED", "policy_version": "t1"}
+    assert r["signals"]["identity"]["status"] == "MATCH" and r["mode"] == "ONLINE"
+
+    # Re-evaluated at the final decision: a challenge started at 10:00 (allowed)
+    # but finished at 12:30 (deny window) is DENY even though the challenge passed.
+    monkeypatch.setattr(pipeline, "passive_liveness",
+                        lambda f: {"status": "UNCERTAIN", "score": 0.5, "per_frame": []},
+                        raising=False)
+    monkeypatch.setattr(pipeline, "quality", lambda f: dict(
+        GOOD_Q, per_frame=[{"ok": True, "face_count": 1, "face_px": 200}] * len(f)), raising=False)
+    monkeypatch.setattr(pipeline, "challenge_check", lambda f, t, pt, a: {
+        "status": "PASS", "per_action": {}, "passive": LIVE}, raising=False)
+    client.post("/operator/clock", json={"iso_time": WED_10})
+    aid = _start(client)
+    _identity(client, aid)
+    assert _liveness(client, aid).json()["next_action"] == "CHALLENGE"
+    ch = client.post(f"/attempt/{aid}/challenge/start").json()
+    client.post("/operator/clock", json={"iso_time": WED_1230})
+    r = client.post(f"/attempt/{aid}/challenge", data={"challenge_id": ch["challenge_id"]},
+                    files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 3).json()
+    assert (r["decision"], r["reason_code"]) == ("DENY", "SCHEDULE_DENIED")
