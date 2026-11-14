@@ -26,6 +26,7 @@ class Attempt:
     t0_mono: float
     deadline_mono: float
     scenario: str | None = None
+    first_action: str | None = None     # quick 1-action challenge shown at the tap
     identity: dict | None = None        # accepted before deadline/decision
     identity_late: list = field(default_factory=list)  # logged, never used
     passive: dict | None = None
@@ -34,6 +35,9 @@ class Attempt:
     decision: dict | None = None        # first-pass response, write-once
     challenge: dict | None = None       # {challenge_id, actions, started_mono}
     challenge_decision: dict | None = None  # write-once
+    challenge_passive: dict | None = None
+    staff_decision: dict | None = None      # write-once
+    pin_failures: int = 0
     stage_ms: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     identity_event: threading.Event = field(default_factory=threading.Event, repr=False)

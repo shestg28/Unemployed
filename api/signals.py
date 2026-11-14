@@ -45,6 +45,18 @@ def _stub_challenge(frames, ts, prompt_ts, actions):
             "passive": {"status": "UNAVAILABLE", "score": None, "stub": True}}
 
 
+def warm_up() -> None:
+    """Load the passive and landmarker models once (first torch call ~1-4 s)."""
+    for name in ("warmup", "warmup_challenge"):
+        fn = getattr(pipeline, name, None)
+        if callable(fn):
+            try:
+                ok = fn()
+                log.warning("pipeline %s: %s", name, "ok" if ok else "unavailable")
+            except Exception:
+                log.exception("pipeline %s failed", name)
+
+
 # --- Safe wrappers --------------------------------------------------------------
 
 def quality(frames: list[bytes]) -> dict:
@@ -56,6 +68,8 @@ def quality(frames: list[bytes]) -> dict:
         out = fn(frames)
         if not isinstance(out, dict) or not isinstance(out.get("ok"), bool):
             raise ValueError("quality() must return a dict with bool 'ok'")
+        if out.get("fail_reason") == "LIVENESS_UNAVAILABLE":  # detector missing: no signal
+            return {**out, "ok": None, "continuity_ok": None, "status": "UNAVAILABLE"}
         return out
     except Exception as e:
         log.exception("quality() failed")
