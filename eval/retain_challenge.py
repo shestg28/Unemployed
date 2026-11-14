@@ -64,6 +64,13 @@ class Handler(BaseHTTPRequestHandler):
             scenario = data["scenario"]
             if scenario not in SCENARIOS:
                 raise ValueError("unknown scenario")
+            presentation = data.get("presentation", "standard")
+            if presentation not in ("standard", "bigscreen1", "improv1"):
+                raise ValueError("unknown presentation")
+            if (presentation == "bigscreen1" and scenario != "phone") or (
+                presentation == "improv1" and scenario != "mask_cutout"
+            ):
+                raise ValueError("presentation does not match scenario")
             capture_id = uuid.uuid4().hex
             folder = GATE / scenario
             folder.mkdir(parents=True, exist_ok=True)
@@ -73,6 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             result = challenge_check(frames, stamps, prompt, self.server.actions)
             summary = {
                 "scenario": scenario, "capture_id": capture_id, "frames": len(frames),
+                "presentation": presentation,
                 "baseline_frames": sum(t < prompt for t in stamps),
                 "status": result["status"],
                 "reason": result["reason"],

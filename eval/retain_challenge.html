@@ -7,7 +7,7 @@ button { padding: .65rem 1rem; font: inherit }
 </style>
 <h1>HID webcam check</h1>
 <p>Consenting teammates only. Approved trial frames are saved under data/gate on this PC.</p>
-<label>Prop <select id="scenario"><option value="print">Print</option><option value="phone">Phone photo</option><option value="replay">Replay video</option><option value="mask_cutout">Cutout mask</option><option value="mask_no_cutout">Mask without cutouts</option><option value="real">Live control</option></select></label><button id="start">Start webcam check</button>
+<label>Prop <select id="scenario"><option value="print">Print</option><option value="phone">Phone photo</option><option value="replay">Replay video</option><option value="mask_cutout">Cutout mask</option><option value="mask_no_cutout">Mask without cutouts</option><option value="real">Live control</option><option value="phone" data-presentation="bigscreen1">Big-screen photo (bigscreen1)</option><option value="mask_cutout" data-presentation="improv1">Improvised partial-face prop (improv1)</option></select></label><button id="start">Start webcam check</button>
 <h2 id="prompt" aria-live="polite"></h2>
 <video id="preview" autoplay playsinline muted></video>
 <canvas id="capture" width="640" height="480" hidden></canvas>
@@ -20,7 +20,9 @@ const ctx = canvas.getContext('2d');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 start.onclick = async () => {
   start.disabled = true;
-  const scenario = document.querySelector('#scenario').value;
+  const selected = document.querySelector('#scenario').selectedOptions[0];
+  const scenario = selected.value;
+  const presentation = selected.dataset.presentation || 'standard';
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
@@ -55,7 +57,7 @@ start.onclick = async () => {
     display.textContent = 'Checking…';
     const response = await fetch('/check', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({frames, times, prompt, scenario})
+      body:JSON.stringify({frames, times, prompt, scenario, presentation})
     });
     if (!response.ok) throw Error('Could not process webcam frames');
     const result = await response.json();
