@@ -80,6 +80,10 @@ SELECT_MAX = int(_f("SELECT_MAX", 4))          # select_frames picks at most thi
 PASSIVE_HIGH = _f("PASSIVE_HIGH", 0.80)
 PASSIVE_LOW = _f("PASSIVE_LOW", 0.30)
 
+# Gate decision 2026-11-14: NO-GO for passive-only. Passive LIVE is never enough for ALLOW;
+# a challenge_check PASS is required first. Keep at 1; 0 exists only for experiments.
+REQUIRE_CHALLENGE = os.environ.get("REQUIRE_CHALLENGE", "1") != "0"
+
 # --- Pass 2 challenge (pipeline/challenge.py) --------------------------------
 # Metrics: SMILE = mean(mouthSmileLeft, mouthSmileRight); OPEN_MOUTH = jawOpen
 # (MediaPipe blendshapes, 0..1); TURN_* = yaw = (nose_x - eye_mid_x) / inter-ocular.

@@ -86,3 +86,26 @@ r = flat_sheet(frames, ts_ms)   # same burst as quality(); OpenCV optical flow o
 ```
 FLAT = the area around the face moves with the face (held photo/phone): spoof evidence.
 NOT_FLAT is not proof of liveness, NO_MOTION is not a spoof. Thresholds `FS_*` in config.py.
+
+## Step 1 gate result (2026-11-14): NO-GO for passive-only
+
+Decision: passive anti-spoof alone may never ALLOW. Every ALLOW requires a
+`challenge_check` PASS (`REQUIRE_CHALLENGE=1` in config.py; `passive_liveness` returns
+`sufficient_for_allow: False`, `challenge_check` returns `allow_eligible`).
+Passive SPOOF can still support DENY.
+
+Calibration counts (kiosk webcam, confirmed props, 30 still frames; threshold-setting
+data, NOT measured evaluation results):
+
+| Class | n | Outcome at the chosen threshold |
+|---|---|---|
+| genuine | 10 | 6 passed |
+| printed photo | 10 | 6 caught |
+| phone photo | 10 | 7 caught |
+
+All three are below the 9/10 target; 7/20 spoof frames passed the passive threshold.
+
+Off-domain reference (not the kiosk camera): 45 CelebA-Spoof images from a Hugging Face
+copy: 10/15 genuine passed, 20/30 spoofs caught, 9.3 ms/frame on a Ryzen 7 9800X3D.
+
+Challenge smoke check: one genuine live webcam attempt, 2/2 actions passed across 49 frames.

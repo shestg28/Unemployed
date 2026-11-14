@@ -39,6 +39,9 @@ Status:
   UNCERTAIN anything else (no baseline, tracking lost, action not seen in order and
             in time, landmarker unavailable). Not doing the action is treated as
             unresolved, not as a spoof. Callers route this to reception, never ALLOW.
+
+allow_eligible = (status == "PASS"). Gate decision 2026-11-14 (passive-only NO-GO):
+a challenge PASS is required before any ALLOW.
 """
 from __future__ import annotations
 
@@ -150,7 +153,8 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     t0 = time.perf_counter()
 
     def done(status, reason, per_action=None, passive=None, tracking=None):
-        return {"status": status, "reason": reason, "per_action": per_action or [],
+        return {"status": status, "reason": reason, "allow_eligible": status == "PASS",
+                "per_action": per_action or [],
                 "passive": passive, "tracking": tracking,
                 "ms": int((time.perf_counter() - t0) * 1000)}
 
