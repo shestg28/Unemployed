@@ -170,6 +170,18 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     frames = [frames[i] for i in order]
     ts = [float(ts[i]) for i in order]
 
+    # thin to ~CH_CHECK_FPS by capture time only (never by content) to stay inside the budget
+    n_in = len(frames)
+    if C.CH_CHECK_FPS > 0:
+        gap = 0.85 * 1000.0 / C.CH_CHECK_FPS  # 0.85: tolerate timestamp jitter
+        keep, last = [], None
+        for i, t in enumerate(ts):
+            if last is None or t - last >= gap:
+                keep.append(i)
+                last = t
+        frames = [frames[i] for i in keep]
+        ts = [ts[i] for i in keep]
+
     try:
         mets = []
         for f in frames:
@@ -183,6 +195,7 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     ious = [_iou(a["bbox"], b["bbox"]) for a, b in zip(mets, mets[1:]) if a["bbox"] and b["bbox"]]
     tracking = {
         "frames": len(mets),
+        "frames_in": n_in,
         "single_face_all": all(m["n_faces"] == 1 for m in mets),
         "min_iou": round(min(ious), 3) if ious else None,
     }

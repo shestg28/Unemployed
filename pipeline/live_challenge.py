@@ -156,6 +156,31 @@ def tally() -> None:
     ps = Counter((r["label"], r["passive_status"]) for r in rows)
     print("passive (logged only):", dict(sorted(ps.items())))
 
+    # by condition: label x note x actions asked. "act_seen" = every asked action was seen
+    # after the minimum reaction time (the action check alone, before tracking/passive).
+    from . import config as C
+    grp = defaultdict(list)
+    for r in rows:
+        n_act = len(r["actions"].split("+"))
+        grp[(r["label"], r.get("note") or "-", f"{n_act}:{r['actions']}" if n_act == 1 else str(n_act))].append(r)
+    print()
+    print(f"{'label':12} {'note':10} {'actions':8} {'n':>3} {'act_seen':>8} {'PASS':>5} {'UNCERT':>6} {'FAIL':>5} "
+          f"{'pasv_SPOOF':>10} {'trk_lost':>8} {'med_ms':>6}")
+    for (lab, note, act), rs in sorted(grp.items()):
+        seen = 0
+        for r in rs:
+            try:
+                on = json.loads(r["onsets_ms"])
+            except Exception:
+                on = [None]
+            seen += bool(on) and all(o is not None and o >= C.CH_MIN_REACTION_MS for o in on)
+        st = Counter(r["status"] for r in rs)
+        m = sorted(int(r["check_ms"]) for r in rs if r["check_ms"])
+        print(f"{lab:12} {note:10} {act:8} {len(rs):>3} {seen:>8} {st['PASS']:>5} {st['UNCERTAIN']:>6} {st['FAIL']:>5} "
+              f"{sum(r['passive_status'] == 'SPOOF' for r in rs):>10} "
+              f"{sum(r['reason'] == 'TRACKING_LOST' for r in rs):>8} {m[len(m) // 2] if m else '':>6}")
+    print("UNCERTAIN = held for reception (not allowed in), not 'detected as a spoof'.")
+
 
 def main():
     ap = argparse.ArgumentParser()
