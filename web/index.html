@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entry Kiosk</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-screen="welcome">
+  <header class="bar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">Secure Entry</span>
+      <span class="brand-sep">/</span>
+      <span class="brand-site">Main Lobby</span>
+    </div>
+    <div class="bar-right">
+      <span id="mockBadge" class="mock-badge" hidden>MOCK</span>
+      <span id="camStatus" class="status"><span class="dot"></span><span class="status-text">Camera starting</span></span>
+      <time id="clock" class="clock">--:--</time>
+    </div>
+  </header>
+
+  <main class="stage">
+    <!-- ============ WELCOME ============ -->
+    <section class="screen screen-welcome" aria-label="Welcome">
+      <h1 class="title">Tap your name to enter</h1>
+      <p class="notice">
+        The camera is used for this check only. One frame goes to AWS Rekognition to match
+        against your enrolled photo. No images are stored after the decision.
+      </p>
+      <div id="names" class="names"></div>
+      <p class="fine">Tapping your name means you agree to this check.</p>
+    </section>
+
+    <!-- ============ CAMERA (capture + challenge) ============ -->
+    <section class="screen screen-camera" aria-label="Camera">
+      <div class="camera">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="guide" aria-hidden="true"><div class="oval"></div></div>
+        <div class="scanline" aria-hidden="true"></div>
+        <div id="camMessage" class="cam-message" hidden></div>
+
+        <!-- challenge prompt overlay -->
+        <div id="prompt" class="prompt" hidden>
+          <div id="promptIcon" class="prompt-icon"></div>
+          <div id="promptWord" class="prompt-word"></div>
+        </div>
+      </div>
+      <div class="camera-status">
+        <div>
+          <div class="eyebrow" id="capLabel">Checking</div>
+          <div class="cap-name" id="capName"></div>
+        </div>
+        <div class="stopwatch"><span id="stopwatch">0.00</span><span class="unit">s</span></div>
+      </div>
+    </section>
+
+    <!-- ============ RESULT ============ -->
+    <section class="screen screen-result" aria-label="Result" aria-live="polite">
+      <div id="resultCard" class="result">
+        <div id="decision" class="decision">ALLOW</div>
+        <div id="reason" class="reason"></div>
+        <div class="timing">
+          <div class="timing-main">Decision in <strong id="decisionTime">0.00</strong> s</div>
+          <div class="timing-split">
+            <span>First pass <strong id="firstPass">0.00 s</strong></span>
+            <span>Total <strong id="total">0.00 s</strong></span>
+          </div>
+        </div>
+
+        <!-- next_action block (MOVE_CLOSER / HOLD_STILL / IMPROVE_LIGHT / RECEPTION / CHALLENGE) -->
+        <div id="nextAction" class="next" hidden>
+          <div id="nextIcon" class="next-icon" aria-hidden="true"></div>
+          <div class="next-body">
+            <div id="nextText" class="next-text"></div>
+            <div id="nextSub" class="next-sub"></div>
+          </div>
+          <button id="retryBtn" class="btn" type="button" hidden>Try again</button>
+        </div>
+        <div id="resultMock" class="result-mock" hidden>MOCK RESPONSE — not a real decision</div>
+      </div>
+      <div class="reset-hint" id="resetHint"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Frames are processed in memory and never stored on this device.</span>
+    <span id="attemptInfo" class="mono"></span>
+  </footer>
+
+  <!-- ============ OPERATOR PANEL (press "o") ============ -->
+  <aside id="operator" class="operator" hidden>
+    <div class="op-head">
+      <strong>Operator</strong>
+      <span class="op-hint">press O to hide</span>
+    </div>
+    <label class="op-row">
+      <span>Scenario</span>
+      <select id="scenario">
+        <option value="genuine">genuine</option>
+        <option value="impostor">impostor</option>
+        <option value="print">print</option>
+        <option value="phone">phone</option>
+        <option value="replay">replay</option>
+        <option value="mask">mask</option>
+        <option value="bad_light">bad_light</option>
+      </select>
+    </label>
+    <label class="op-row" id="mockNextRow" hidden>
+      <span>Mock next_action</span>
+      <select id="mockNext">
+        <option value="auto">auto (cycle)</option>
+        <option value="NONE">NONE</option>
+        <option value="MOVE_CLOSER">MOVE_CLOSER</option>
+        <option value="HOLD_STILL">HOLD_STILL</option>
+        <option value="IMPROVE_LIGHT">IMPROVE_LIGHT</option>
+        <option value="RETRY">RETRY</option>
+        <option value="CHALLENGE">CHALLENGE</option>
+        <option value="RECEPTION">RECEPTION</option>
+      </select>
+    </label>
+    <div class="op-row"><span>Backend</span><span id="opBackend" class="mono"></span></div>
+    <div class="op-row"><span>Last attempt</span><span id="opAttempt" class="mono">—</span></div>
+  </aside>
+
+  <canvas id="canvas" hidden></canvas>
+  <script src="app.js"></script>
+</body>
+</html>
