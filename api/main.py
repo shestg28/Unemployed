@@ -185,6 +185,8 @@ def _log(at_id, user_id, scenario, phase, d, q, p, ident, stage, first_ms, total
         "scores": {
             "quality_ok": (q or {}).get("ok"),
             "continuity_ok": (q or {}).get("continuity_ok"),
+            "blur_per_frame": [f.get("blur") for f in (q or {}).get("per_frame", [])
+                               if isinstance(f, dict)],
             "passive_status": (p or {}).get("status"),
             "passive_score": (p or {}).get("score"),
             "identity_status": _identity_view(ident)["status"],
