@@ -1,0 +1,4 @@
+-r ../pipeline/requirements.txt
+fastapi
+uvicorn
+python-multipart
