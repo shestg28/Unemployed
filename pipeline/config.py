@@ -25,7 +25,11 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(REPO_ROOT / ".env")
 
-AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
+# Region comes from the environment / .env (sandbox is us-east-1).
+# ap-south-1 is only a last-resort fallback when nothing is set.
+AWS_REGION = (os.environ.get("AWS_DEFAULT_REGION")
+              or os.environ.get("AWS_REGION")
+              or "ap-south-1")
 
 # Enrolled reference photos: <ENROLL_DIR>/<user_id>.jpg|.jpeg|.png
 ENROLL_DIR = Path(os.environ.get("ENROLL_DIR", REPO_ROOT / "data" / "enrolled"))
