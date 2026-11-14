@@ -7,6 +7,7 @@ cached for 5 s; the background loop refreshes it so decisions rarely wait.
 Network-level only: expired creds still show ONLINE, but then identity
 returns UNKNOWN and sync stays pending, so nothing is ever auto-approved.
 """
+import logging
 import os
 import socket
 import threading
@@ -74,7 +75,11 @@ def refresh() -> str:
             m = "ONLINE"  # one blip on a slow network is not an outage
         else:
             m = "OFFLINE"
+        prev = _state["mode"]
         _state.update(mode=m, checked=time.monotonic(), fails=fails)
+    if prev != m or not ok:
+        logging.getLogger("uvicorn.error").warning(
+            "mode %s -> %s (health %s, consecutive fails %d)", prev, m, "ok" if ok else "FAILED", fails)
     return m
 
 
