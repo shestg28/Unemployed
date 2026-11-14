@@ -1,4 +1,4 @@
-"""Identity via Rekognition CompareFaces (ap-south-1).
+"""Identity via Rekognition CompareFaces (region from AWS_DEFAULT_REGION).
 
 - One boto3 client, shared with the pipeline (pipeline.liveness.get_client),
   created once at startup. Creds come from repo-root .env via pipeline.config
