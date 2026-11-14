@@ -4,12 +4,15 @@
 
 Add `--mode vote` to run the requested passive-only experiment. Within the two-second
 trial, collect completed scores from distinct webcam frames, then uniformly sample
-six scores without replacement. Four or more strictly greater than 0.75 gives
-APPROVED; three or fewer gives REJECTED. Exactly 0.75 does not count. Fewer than
+six scores without replacement. Four or more strictly greater than 0.85 gives
+APPROVED; four or more strictly below 0.75 gives REJECTED. Otherwise run the
+random-action challenge, including boundary scores of 0.75 and 0.85. Fewer than
 six finite valid scores gives REQUEST VERIFICATION. Scores completed after the
 deadline are excluded. Selected scores/counts and actual elapsed time print to the
 console; frames stay in memory. This sampling is random among scored frames, not
-all camera frames. The challenge is not run in this opt-in mode. APPROVED is an
+all camera frames. Step-up has a separate six-second capture/check budget (400ms
+baseline, snapshot submitted at 5400ms); it is not a two-second authentication.
+Late/unavailable step-up results remain REQUEST VERIFICATION. APPROVED is an
 experimental passive vote, not a door authorization or validated spoof verdict.
 The default challenge mode and production pipeline remain unchanged.
 

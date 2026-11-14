@@ -17,8 +17,10 @@ def vote_result(scores, rng=random):
     if len(valid) < 6:
         return 'REQUEST VERIFICATION', [], 0
     selected = rng.sample(valid, 6)
-    votes = sum(s > .75 for s in selected)
-    return ('APPROVED' if votes >= 4 else 'REJECTED'), selected, votes
+    votes = sum(s > .85 for s in selected)
+    low = sum(s < .75 for s in selected)
+    outcome = 'APPROVED' if votes >= 4 else 'REJECTED' if low >= 4 else 'CHALLENGE REQUIRED'
+    return outcome, selected, votes
 
 
 def main():
@@ -52,7 +54,7 @@ def main():
             raise ValueError('Cannot read sample')
         print(score(frame), flush=True)
         return
-    if args.mode == 'challenge' and not warmup_challenge():
+    if not warmup_challenge():
         raise RuntimeError('Challenge unavailable; refusing to start combined demo')
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -68,6 +70,8 @@ def main():
     box, message = None, 'Looking for one face'
     prompt_ts = None
     trial_scores = []
+    active_mode = args.mode
+    step_up = False
     try:
         while True:
             ok, frame = cap.read()
@@ -101,13 +105,17 @@ def main():
                 elapsed = max(0, now-started)
                 prompt = 'Hold neutral for baseline' if elapsed < 400 else ' THEN '.join(actions)
                 result_text = f'{elapsed/1000:.1f}/2.0s: {prompt}'
-                if args.mode == 'vote':
+                if active_mode == 'vote':
                     result_text = f'{elapsed/1000:.1f}/2.0s: collecting scores ({len(trial_scores)})'
                 if elapsed >= 400 and prompt_ts is None:
                     prompt_ts = now
-                if args.mode == 'challenge' and elapsed >= 1400 and challenge_job is None:
+                check_at = 5400 if step_up else 1400
+                deadline = 6000 if step_up else 2000
+                if step_up:
+                    result_text = f'STEP-UP {elapsed/1000:.1f}s: {prompt}'
+                if active_mode == 'challenge' and elapsed >= check_at and challenge_job is None:
                     challenge_job = pool.submit(challenge_check, list(frames), list(stamps), prompt_ts, actions)
-                if elapsed >= 2000:
+                if elapsed >= deadline:
                     result = {'status': 'UNCERTAIN', 'reason': 'DEADLINE'}
                     if challenge_job is not None and challenge_job.done():
                         try:
@@ -117,17 +125,24 @@ def main():
                     outcome = 'LIVENESS PASS (identity/policy required)' if result['status'] == 'PASS' else 'REQUEST VERIFICATION'
                     if result['status'] == 'FAIL':
                         outcome = 'DENY: challenge failed'
-                    if args.mode == 'vote':
+                    if active_mode == 'vote':
                         outcome, selected, votes = vote_result(trial_scores)
                         result = {'status': 'NOT_RUN', 'reason': 'EXPERIMENTAL_PASSIVE_VOTE'}
-                        print({'mode': 'vote', 'selected_scores': selected, 'above_075': votes,
+                        print({'mode': 'vote', 'selected_scores': selected, 'above_085': votes,
                                'n_selected': len(selected), 'n_available': len(trial_scores)}, flush=True)
-                        outcome += f' ({votes}/{len(selected)} above 0.75)'
+                        outcome += f' ({votes}/{len(selected)} above 0.85)'
                     result_text = f'{outcome} | {elapsed:.0f}ms | C to retry'
                     print({'outcome': outcome, 'elapsed_ms': round(elapsed, 1), 'challenge': result['status'],
                            'reason': result.get('reason'), 'late_result_can_change_decision': False}, flush=True)
                     frames, stamps = [], []
                     started = None
+                    if active_mode == 'vote' and outcome.startswith('CHALLENGE REQUIRED'):
+                        active_mode = 'challenge'
+                        step_up = True
+                        started = time.perf_counter()*1000
+                        prompt_ts = None
+                        challenge_job = None
+                        actions = random.sample(['SMILE','OPEN_MOUTH','TURN_LEFT','TURN_RIGHT'], 2)
             if box:
                 x,y,w,h = box
                 cv2.rectangle(view,(x,y),(x+w,y+h),(255,180,0),2)
@@ -143,6 +158,8 @@ def main():
             if key == ord('c') and started is None:
                 if challenge_job is None or challenge_job.done():
                     challenge_job = None
+                    active_mode = args.mode
+                    step_up = False
                     armed = True
                     result_text = 'Waiting for face detection'
     finally:
