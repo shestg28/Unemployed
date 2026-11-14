@@ -4,13 +4,26 @@
 
 | Time | Say or do |
 |---|---|
-| 0:00–0:20 | **Slide 1.** “A wrong ALLOW is a breach, a wrong DENY is an inconvenience, so doubt never resolves to ALLOW.” Explain that the kiosk checks whether a live person matches the identity they claim. |
-| 0:20–0:45 | **Slide 2.** Follow the two-speed diagram. The first decision checks presence and the claimed identity. Uncertainty keeps the door closed and asks for a specific fix or a short follow-up check. Access requires affirmative evidence of both presence and identity. |
-| 0:45–1:05 | **Slide 3, live.** Siddhant taps his identity and presents his face. Point to the actual ALLOW and timer if it appears under 2 seconds. Read the actual outcome and time if it differs. |
-| 1:05–1:45 | **Live.** Run a print, phone still, replay and mask against the same claimed identity. Read each decision aloud. Say “none gets in” only if all four were held through the end of their shown attempts. A REQUEST keeps access closed. Report an unexpected ALLOW plainly. |
-| 1:45–2:05 | **Live.** Use dim light. Show the reason on screen, then point to the targeted instruction, such as “Move into better light.” Show the corrected-light retry if the clock allows. |
-| 2:05–2:35 | **Slide 4.** Show Session B counts. Read the false accept count and denominator, the separate DENY-only figure and the first-pass median and p95 with sample size. If collection is pending, say so and keep the live demonstration separate. |
-| 2:35–3:00 | **Slide 5.** “One tap selects the record to check, like a badge. The kiosk makes a one-to-one comparison. It never searches a gallery, stores no attempt images, and sends no faces to Bedrock.” Verify those behaviors in the demo build before presenting them as implemented. |
+| 0:00–0:15 | **Slide 1.** “A wrong ALLOW is a breach, a wrong DENY is an inconvenience, so doubt never resolves to ALLOW.” |
+| 0:15–0:35 | **Slide 2.** Read the 30-frame camera test and the 90% target. “We measured the off-the-shelf model, it failed our bar, so it never approves anyone on its own.” |
+| 0:35–0:50 | **Slide 3.** Explain the two speeds. The kiosk gives a first decision, then a mandatory challenge precedes every online biometric ALLOW. Access also requires an identity match and schedule permission. |
+| 0:50–1:30 | **Slide 4, live.** Run permitted-time genuine verification and show REQUEST → challenge → ALLOW. Read the first-pass timer and total separately. Show the same person's prohibited-time DENY. Use the recorded run if a demo clock change is impractical. Show bad light with its targeted fix and one spoof live if time allows. Use rehearsed captures for the remaining print, phone, replay and mask cases. Say “none gets in” only when the shown outcomes support it. |
+| 1:30–2:20 | **Slide 5.** “Offline, the kiosk can still say no on its own, but only a person with a badge check can say yes.” Show the offline screen and the no-access spoof outcome. Show staff checking a badge, authorizing access, and the queued event. Reconnect and show pending sync at zero. Use a short recorded sequence for the restart and event-ID checks. Show Shesh's online staff-approval status if time allows. |
+| 2:20–2:45 | **Slide 6.** Show Session B counts, false accepts with the denominator, and first-pass median and p95 with the sample size. Read the schedule/offline pass counts from the rehearsal record. Label any pending cases. |
+| 2:45–3:00 | **Slide 7.** “One tap selects the record to check, like a badge. The kiosk makes a one-to-one comparison. It never searches a gallery, stores no attempt images, and sends no faces to Bedrock.” Verify those behaviors in the demo build before presenting them as implemented. |
+
+## Eight checks to rehearse
+
+| Case | Show the audience |
+|---|---|
+| Genuine at permitted time | Tap the claimed ID, complete the challenge, and show ALLOW. |
+| Same person at prohibited time | Show the test-clock setting and the prohibited-time DENY. |
+| Print, phone or replay | Show verification fail or an earlier DENY. The door stays closed. |
+| Wi-Fi off | Show the offline state and confirm there is no automatic ALLOW. |
+| Offline staff verification | Staff checks the badge, explicitly authorizes access, and shows the pending event. |
+| Wi-Fi restored | Show pending sync drop to zero and the same event appear once on the server. |
+| App restart | Show the queued event survive a restart before reconnecting. After sync, restart again and verify one record per event ID. |
+| Offline spoof | Present an approved test prop while offline and show that no access was granted. |
 
 ## Judge Q&A
 
