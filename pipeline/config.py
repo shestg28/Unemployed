@@ -38,8 +38,8 @@ ENROLL_DIR = Path(os.environ.get("ENROLL_DIR", REPO_ROOT / "data" / "enrolled"))
 BUDGET_MS = 2000
 # How long we wait for the parallel Rekognition calls before giving up.
 REKOGNITION_DEADLINE_S = 1.7
-CONNECT_TIMEOUT_S = 1.0
-READ_TIMEOUT_S = 1.6
+CONNECT_TIMEOUT_S = 2.0  # integrator fix 14 Nov: 1.6 s read cut off slow-network calls
+READ_TIMEOUT_S = 3.0     # (identity is still bounded by the attempt deadline / step-up)
 
 # --- Contract-fixed ---------------------------------------------------------
 SIMILARITY_THRESHOLD = 99  # CONTRACT.md hard rule
