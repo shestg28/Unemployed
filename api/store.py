@@ -39,6 +39,7 @@ class Attempt:
     staff_decision: dict | None = None      # write-once
     pin_failures: int = 0
     stage_ms: dict = field(default_factory=dict)
+    identity_timing: dict | None = None     # ms since t0, for the attempt log
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     identity_event: threading.Event = field(default_factory=threading.Event, repr=False)
 

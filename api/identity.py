@@ -88,13 +88,38 @@ _loaded = False
 _last_call_ok: bool | None = None
 
 
+_last_call_mono = 0.0
+KEEP_WARM_S = 15.0  # idle HTTPS connections were dropped: first attempt after idle took 2.7 s
+
+
+def keep_warm_once() -> bool:
+    """If no CompareFaces in the last KEEP_WARM_S, make one tiny call (reference vs
+    itself) so the pooled TLS connection stays open. Never raises."""
+    if time.monotonic() - _last_call_mono < KEEP_WARM_S:
+        return False
+    with _enrolled_lock:
+        ref = next(iter(_ENROLLED.values()), None)
+    if ref is None:
+        return False
+    try:
+        get_client().compare_faces(SourceImage={"Bytes": ref}, TargetImage={"Bytes": ref},
+                                   SimilarityThreshold=0)
+        _record(True)
+        return True
+    except Exception as e:
+        log.warning("keep-warm CompareFaces failed: %s", type(e).__name__)
+        _record(False)
+        return False
+
+
 def service_ok() -> bool:
     return _last_call_ok is True
 
 
 def _record(ok: bool) -> None:
-    global _last_call_ok
+    global _last_call_ok, _last_call_mono
     _last_call_ok = ok
+    _last_call_mono = time.monotonic()
 
 
 def load_enrolled() -> int:
@@ -209,6 +234,8 @@ def compare(user_id: str, frame: bytes) -> dict:
     if ref is None:
         return out("UNKNOWN", None, "not_enrolled")
     target, _crop_note = face_crop(frame)
+    if _crop_note.startswith("no_single_face"):
+        log.warning("identity probe: %s", _crop_note)
     try:
         resp = get_client().compare_faces(
             SourceImage={"Bytes": ref},
@@ -219,5 +246,9 @@ def compare(user_id: str, frame: bytes) -> dict:
         return out(*classify(resp))
     except Exception as e:  # no creds, timeout, no face in source, throttling...
         _record(False)
-        log.warning("compare_faces failed: %s", type(e).__name__)
-        return out("UNKNOWN", None, f"error:{type(e).__name__}")
+        err = getattr(e, "response", None) or {}
+        code = (err.get("Error") or {}).get("Code") or type(e).__name__
+        msg = ((err.get("Error") or {}).get("Message") or str(e))[:200]
+        log.warning("compare_faces failed: %s: %s (target %d B, %s)", code, msg, len(target),
+                    _crop_note)
+        return out("UNKNOWN", None, f"error:{code}: {msg}"[:240])

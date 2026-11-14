@@ -16,12 +16,17 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pipeline import config as PC
 
 CACHE_S = 5.0
-CONNECT_TIMEOUT_S = 0.8
-HEALTH_BUDGET_S = 1.0   # whole check incl. DNS (getaddrinfo ignores socket timeouts)
+# Integrator fix 14 Nov: on the venue hotspot a single slow DNS/connect (>0.8 s) flipped
+# the kiosk OFFLINE mid-demo (identity "offline" -> no ALLOW). Checks run in the
+# background, so a longer timeout never delays a decision; and ONLINE -> OFFLINE needs
+# FAILS_TO_OFFLINE consecutive failed checks (~5 s apart). OFFLINE -> ONLINE is immediate.
+CONNECT_TIMEOUT_S = 1.5
+HEALTH_BUDGET_S = 2.0   # whole check incl. DNS (getaddrinfo ignores socket timeouts)
+FAILS_TO_OFFLINE = 2
 STALE_OK_S = 30.0       # decision path reuses a cached result up to this old
 
 _lock = threading.Lock()
-_state = {"mode": None, "checked": 0.0}
+_state = {"mode": None, "checked": 0.0, "fails": 0}
 _operator_force_offline = False
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="health")
 _refreshing = threading.Lock()
@@ -55,9 +60,21 @@ def health_ok() -> bool:
 
 
 def refresh() -> str:
-    m = "OFFLINE" if _forced() or not health_ok() else "ONLINE"
+    if _forced():
+        m = "OFFLINE"
+        with _lock:
+            _state.update(mode=m, checked=time.monotonic())
+        return m
+    ok = health_ok()
     with _lock:
-        _state.update(mode=m, checked=time.monotonic())
+        fails = 0 if ok else _state["fails"] + 1
+        if ok:
+            m = "ONLINE"
+        elif _state["mode"] == "ONLINE" and fails < FAILS_TO_OFFLINE:
+            m = "ONLINE"  # one blip on a slow network is not an outage
+        else:
+            m = "OFFLINE"
+        _state.update(mode=m, checked=time.monotonic(), fails=fails)
     return m
 
 

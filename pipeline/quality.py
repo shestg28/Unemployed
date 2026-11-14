@@ -16,7 +16,9 @@ fail_reason values are CONTRACT reason codes:
 """
 from __future__ import annotations
 
-from collections import Counter
+import hashlib
+import threading
+from collections import Counter, OrderedDict
 
 import cv2
 import numpy as np
@@ -48,7 +50,30 @@ def _mp_box(m: dict, img) -> list[int] | None:
     return [x0, y0, x1 - x0, y1 - y0] if x1 - x0 > 2 and y1 - y0 > 2 else None
 
 
+_qcache: "OrderedDict[tuple, dict]" = OrderedDict()
+_qcache_lock = threading.Lock()
+_QCACHE_MAX = 64
+
+
 def _frame_quality(frame) -> dict:
+    """Memoised by frame bytes (+ thresholds): select_frames() inside challenge_check's
+    passive run re-asks for the same burst; no second decode / Laplacian."""
+    if not isinstance(frame, (bytes, bytearray)):
+        return _frame_quality_uncached(frame)
+    key = (hashlib.sha1(frame).hexdigest(), C.Q_MIN_BLUR, C.Q_MIN_FACE_PX, C.Q_MIN_BRIGHTNESS)
+    with _qcache_lock:
+        if key in _qcache:
+            _qcache.move_to_end(key)
+            return dict(_qcache[key])
+    rec = _frame_quality_uncached(frame)
+    with _qcache_lock:
+        _qcache[key] = rec
+        while len(_qcache) > _QCACHE_MAX:
+            _qcache.popitem(last=False)
+    return dict(rec)
+
+
+def _frame_quality_uncached(frame) -> dict:
     img = decode(frame)
     if img is None:
         return {"face_count": 0, "face_px": 0, "blur": 0.0, "brightness": 0.0,

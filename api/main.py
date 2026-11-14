@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     identity.init_client()     # shared boto3 client, once (keep-alive pool)
     identity.warm_up()         # throwaway CompareFaces: pay TLS setup now
     await asyncio.to_thread(signals.warm_up)  # load passive + landmarker models now
+    await asyncio.to_thread(_warm_face_path)   # blendshapes + MiniFASNet on a real face
     stubs = signals.stubs_in_use()
     if stubs:
         log.warning("STUB pipeline functions in use (never ALLOW): %s", stubs)
@@ -46,9 +47,40 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(mode.refresh)      # first health check
     stop = asyncio.Event()
     task = asyncio.create_task(sync_worker.run_forever(stop))
+    warm = asyncio.create_task(_keep_identity_warm(stop))
     yield
     stop.set()
     await task
+    warm.cancel()
+
+
+async def _keep_identity_warm(stop: asyncio.Event) -> None:
+    """Keep the Rekognition HTTPS connection open between attempts (ONLINE only)."""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=5.0)
+            return
+        except asyncio.TimeoutError:
+            pass
+        if mode.current() == "ONLINE":
+            await asyncio.to_thread(identity.keep_warm_once)
+
+
+def _warm_face_path() -> None:
+    """The gray-image warm-ups never find a face, so the blendshape graph and the
+    MiniFASNet crop path stayed cold until the first real attempt. Run the first-pass
+    pipeline once on an enrolled reference (in memory; nothing logged or kept)."""
+    ids = identity.enrolled_ids()
+    ref = identity.reference_for(ids[0]) if ids else None
+    if not ref:
+        return
+    try:
+        t = time.perf_counter()
+        _first_pass_pipeline([ref, ref, ref], [0, 100, 200], 150, "SMILE")
+        logging.getLogger("uvicorn.error").info(
+            "face-path warm-up in %d ms", int((time.perf_counter() - t) * 1000))
+    except Exception:
+        log.exception("face-path warm-up failed")
 
 
 app = FastAPI(title="HID liveness", lifespan=lifespan)
@@ -139,6 +171,24 @@ def _quality_and_passive(frames: list[bytes], ts: list[int]) -> tuple[dict, dict
     return q, p, stage
 
 
+def _first_pass_pipeline(frames: list[bytes], ts: list[int], prompt_ts: int,
+                         action: str) -> tuple[dict, dict, dict]:
+    """ONE MediaPipe pass per frame. quality() landmarks every frame once (memoised by
+    bytes); challenge_check() then reuses those landmarks and its passive run reuses the
+    per-frame quality. Sequential on purpose: run in parallel, both missed the cache and
+    landmarked every frame twice behind the same detector lock (650-740 ms live)."""
+    t = time.perf_counter()
+    q = signals.quality(frames)
+    t_q = time.perf_counter()
+    ch = signals.challenge_check(frames, ts, prompt_ts, [action])
+    t_c = time.perf_counter()
+    p_ms = int(((ch.get("passive") or {}).get("ms")) or 0)
+    ch_ms = int((t_c - t_q) * 1000)
+    stage = {"quality": int((t_q - t) * 1000), "passive": p_ms,
+             "challenge": max(ch_ms - p_ms, 0), "pipeline": int((t_c - t) * 1000)}
+    return q, ch, stage
+
+
 def _quality_view(q: dict | None) -> dict:
     q = q or {}
     return {"ok": q.get("ok"), "fail_reason": q.get("fail_reason"),
@@ -192,6 +242,7 @@ def _log(at_id, user_id, scenario, phase, d, q, p, ident, stage, first_ms, total
             "passive_score": (p or {}).get("score"),
             "identity_status": _identity_view(ident)["status"],
             "identity_similarity": _identity_view(ident)["similarity"],
+            "identity_note": _identity_view(ident)["note"],
             "challenge_status": (challenge or {}).get("status"),
             "quick_challenge": sig.get("quick_challenge"),
             "labels": labels,
@@ -224,12 +275,23 @@ def attempt_start(body: StartBody) -> dict:
 def attempt_identity(attempt_id: str, frame: UploadFile = File(...),
                      capture_ts_ms: str | None = Form(None)) -> dict:
     at = _get_attempt(attempt_id)
+    id_recv = now_ms() - at.server_t0_ms  # t0 -> identity frame received
     data = _read_frames([frame])
     try:
         res = (dict(OFFLINE_IDENTITY) if mode.current() == "OFFLINE"
                else identity.compare(at.user_id, data[0]))
     finally:
         data.clear()
+    id_done = now_ms() - at.server_t0_ms
+    try:
+        cap = int(float(capture_ts_ms)) - at.server_t0_ms if capture_ts_ms else None
+    except ValueError:
+        cap = None
+    at.identity_timing = {"id_capture": cap, "id_recv": id_recv, "id_compare": res.get("ms"),
+                          "id_done": id_done}
+    if res.get("identity") == "UNKNOWN":
+        log.warning("identity UNKNOWN for %s: %s (%s ms)", attempt_id, res.get("note"),
+                    res.get("ms"))
     outcome = STORE.record_identity(attempt_id, res)
     if outcome == "unknown_attempt":
         raise HTTPException(404, "unknown attempt_id")
@@ -261,28 +323,24 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
                      prompt_ts_ms: str | None = Form(None),
                      scenario: str | None = Form(None)) -> dict:
     at = _get_attempt(attempt_id)
+    recv_ms = now_ms() - at.server_t0_ms  # t0 -> liveness upload fully received
     if at.decision is not None:  # first pass is FINAL
         return at.decision
     data = _read_frames(frames)
     try:
         ts = _parse_ts(capture_ts_ms, len(data))
+        timing = {"liveness_recv": recv_ms,
+                  "last_capture": (max(ts) - at.server_t0_ms) if any(ts) else None}
         labels_fut = _labels_future(data[len(data) // 2])
         quick = None
         if prompt_ts_ms and at.first_action and mode.current() == "ONLINE":
             # 2 s redesign: quality + the ONE quick action in parallel. The
             # challenge's own passive run is the (log-only) passive signal.
             prompt_ts = _parse_ts([prompt_ts_ms], 1)[0]
-            t = time.perf_counter()
-            q_fut = _EXECUTOR.submit(signals.quality, data)
-            ch = signals.challenge_check(data, ts, prompt_ts, [at.first_action])
-            t_c = time.perf_counter()
-            q = q_fut.result()
+            q, ch, stage = _first_pass_pipeline(data, ts, prompt_ts, at.first_action)
             p = ch.get("passive") or {"status": "UNAVAILABLE", "score": None}
             quick = {"action": at.first_action, "status": ch.get("status"),
                      "reason": ch.get("reason")}
-            stage = {"quality": int((time.perf_counter() - t) * 1000),
-                     "passive": (p or {}).get("ms", 0) or 0,
-                     "challenge": int((t_c - t) * 1000)}
         else:  # no prompt sent, or offline (offline: staff verify, no challenge)
             q, p, stage = _quality_and_passive(data, ts)
     finally:
@@ -292,12 +350,15 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
     if mode.current() == "ONLINE":  # offline: no identity is coming
         at.identity_event.wait(timeout=max(at.deadline_mono - time.monotonic(), 0.0))
     stage["identity_wait"] = int((time.perf_counter() - t_wait) * 1000)
+    stage.update(timing)
 
     with at.lock:
         if at.decision is not None:  # a concurrent request decided first
             return at.decision
         t_dec = time.perf_counter()
         ident = identity_snapshot(at)  # on-time result only
+        if at.identity_timing:
+            stage.update(at.identity_timing)
         sig = _decision_signals(q, p, ident, user_id=at.user_id, quick=quick)
         d = decide(sig)
         stage["decide"] = int((time.perf_counter() - t_dec) * 1000)

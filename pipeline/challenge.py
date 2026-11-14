@@ -141,6 +141,15 @@ def metrics_for(frame, img_bgr: np.ndarray) -> dict:
     return m
 
 
+def cached_metrics(frame) -> dict | None:
+    """Landmarks already computed for these frame bytes (by quality()), else None."""
+    if not isinstance(frame, (bytes, bytearray)):
+        return None
+    key = hashlib.sha1(frame).hexdigest()
+    with _mcache_lock:
+        return _mcache.get(key)
+
+
 def landmarker_ok() -> bool:
     try:
         _landmarker()
@@ -206,6 +215,10 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     try:
         mets = []
         for f in frames:
+            m = cached_metrics(f)  # quality() ran first: no second decode or landmark pass
+            if m is not None:
+                mets.append(m)
+                continue
             img = decode(f)
             mets.append(metrics_for(f, img) if img is not None else
                         {"n_faces": 0, "smile": None, "jaw": None, "yaw": None, "bbox": None})
