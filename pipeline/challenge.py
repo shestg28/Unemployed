@@ -29,12 +29,14 @@ Rules:
     onset of action k-1, and its rise must start then or later (a pose already held
     from earlier doesn't count), so doing them out of order is not seen
   - the same single face must be tracked through every frame
-  - passive anti-spoof keeps running on quality-selected frames; SPOOF overrides a
-    completed challenge (completing an action never outweighs strong spoof evidence)
+  - passive anti-spoof still runs on quality-selected frames. It never causes FAIL
+    (no DENY from passive: genuine faces fell below threshold 4/10 times), but a
+    passive SPOOF turns a completed challenge into UNCERTAIN (reception), so
+    passive evidence can only block ALLOW
 
 Status:
-  FAIL      passive says SPOOF, or an action that "started" before the prompt could
-            have been seen (pre-recorded response)
+  FAIL      an action that "started" before the prompt could have been seen
+            (pre-recorded response)
   PASS      every action done in order, tracking intact, passive not SPOOF
   UNCERTAIN anything else (no baseline, tracking lost, action not seen in order and
             in time, landmarker unavailable). Not doing the action is treated as
@@ -217,9 +219,7 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
                     break
         per_action.append(rec)
 
-    # --- verdict (strong spoof evidence first) ---
-    if passive.get("status") == "SPOOF":
-        return done("FAIL", "SPOOF_PASSIVE", per_action, passive, tracking)
+    # --- verdict (the challenge decides; passive SPOOF can only hold back a PASS) ---
     if any(r["pre_prompt"] for r in per_action):
         return done("FAIL", "ACTION_BEFORE_PROMPT", per_action, passive, tracking)
     if any(r["baseline"] is None for r in per_action):
@@ -227,6 +227,8 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     if not tracking["ok"]:
         return done("UNCERTAIN", "TRACKING_LOST", per_action, passive, tracking)
     if all(r["done"] for r in per_action):
+        if passive.get("status") == "SPOOF":  # never DENY on passive, but never ALLOW over it
+            return done("UNCERTAIN", "PASSIVE_SPOOF_REVIEW", per_action, passive, tracking)
         return done("PASS", "CHALLENGE_PASSED", per_action, passive, tracking)
     return done("UNCERTAIN", "ACTION_NOT_SEEN", per_action, passive, tracking)
 

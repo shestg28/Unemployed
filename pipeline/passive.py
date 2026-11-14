@@ -11,9 +11,10 @@ Conservative aggregation (thresholds in config, env-overridable):
 Scores are Silent-Face live scores (see silentface.py). They are NOT
 probabilities; never present them as "% secure".
 
-Gate decision (2026-11-14): NO-GO for passive-only. LIVE here is a supporting signal,
-never sufficient for ALLOW. ALLOW requires challenge_check(...) == PASS
-(config.REQUIRE_CHALLENGE). SPOOF can still support DENY.
+Gate decision (2026-11-14): NO-GO for passive-only. Passive never ALLOWs and never
+DENYs (genuine faces fell below threshold 4/10 times). ALLOW requires
+challenge_check(...) == PASS (config.REQUIRE_CHALLENGE); a SPOOF here turns a passed
+challenge into UNCERTAIN (reception).
 """
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ def passive_liveness(frames: list) -> dict:
         "n_scored": len(scores),
         "thresholds": {"high": C.PASSIVE_HIGH, "low": C.PASSIVE_LOW},
         "per_frame": per_frame,
-        "sufficient_for_allow": False,  # gate NO-GO: ALLOW needs challenge_check PASS
+        "can_allow": False, "can_deny": False,  # gate NO-GO; SPOOF only holds back a challenge PASS
         "ms": int((time.perf_counter() - t0) * 1000),
     }
 

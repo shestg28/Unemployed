@@ -72,7 +72,7 @@ On Linux the MediaPipe Tasks library also needs `libEGL.so.1` (`apt install libe
 from pipeline import challenge_check
 r = challenge_check(frames, ts_ms, prompt_ts_ms, ["SMILE", "TURN_LEFT"])
 # {status: PASS|FAIL|UNCERTAIN, reason, per_action:[{action, baseline, threshold, peak, onset_ms, done, pre_prompt}],
-#  passive:{...passive_liveness on quality-selected challenge frames...}, tracking:{ok, single_face_all, min_iou}, ms}
+#  passive:{...passive_liveness on quality-selected challenge frames; SPOOF holds back PASS...}, tracking:{ok, single_face_all, min_iou}, ms}
 ```
 Deltas, timeout, hold frames, minimum reaction time and mirroring are in `config.py` (`CH_*`, env-overridable).
 TURN_LEFT means the visitor's own left on raw (unmirrored) frames; set `CH_MIRRORED=1` if the browser sends mirrored frames.
@@ -91,8 +91,9 @@ NOT_FLAT is not proof of liveness, NO_MOTION is not a spoof. Thresholds `FS_*` i
 
 Decision: passive anti-spoof alone may never ALLOW. Every ALLOW requires a
 `challenge_check` PASS (`REQUIRE_CHALLENGE=1` in config.py; `passive_liveness` returns
-`sufficient_for_allow: False`, `challenge_check` returns `allow_eligible`).
-Passive SPOOF can still support DENY.
+`can_allow: False, can_deny: False`, `challenge_check` returns `allow_eligible`).
+Passive never ALLOWs and never DENYs (genuine faces fell below threshold 4/10 times).
+A passive SPOOF turns a passed challenge into UNCERTAIN (reception), never FAIL.
 
 Calibration counts (kiosk webcam, confirmed props, 30 still frames; threshold-setting
 data, NOT measured evaluation results):
@@ -109,3 +110,16 @@ Off-domain reference (not the kiosk camera): 45 CelebA-Spoof images from a Huggi
 copy: 10/15 genuine passed, 20/30 spoofs caught, 9.3 ms/frame on a Ryzen 7 9800X3D.
 
 Challenge smoke check: one genuine live webcam attempt, 2/2 actions passed across 49 frames.
+
+## Live challenge test (webcam, one command per attempt)
+
+```
+python -m pipeline.live_challenge --label genuine --who sonu
+python -m pipeline.live_challenge --label print   --who print1
+python -m pipeline.live_challenge --tally
+```
+Labels: genuine, print, phone, replay, mask, mask_cutout. Each attempt: ~0.8 s baseline,
+then 2 random actions on screen, frames captured until `CH_TIMEOUT_MS`, then
+`challenge_check`. One row per attempt is appended to `logs/live_challenge.csv` (gitignored)
+(no images saved). `--tally` prints counts per label x status and challenge ms.
+For spoofs, PASS = the attack got through; FAIL/UNCERTAIN = stopped (never ALLOW).
