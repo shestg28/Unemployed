@@ -1,18 +1,29 @@
 # Experimental combined demo
 
+## Basic button interface
+
+Run `python eval/basic_ui.py --pipeline-root C:/path/to/HID-with-working-pipeline`
+with the same environment/models described below. Python needs Tk support (included
+in the standard Windows Python installer). Click Run check; a single detected face
+starts the scoring window. Results show six randomly selected completed scores and
+measured elapsed time. Run again starts a fresh trial. No challenge runs in this UI.
+Four scores >0.85 approve, four <0.75 reject, otherwise request verification.
+This is an experimental local display, not an integrated access controller. No
+images are saved. Actual elapsed time can exceed two seconds due to inference and
+camera latency; do not present the two-second target as a demonstrated guarantee.
+
 ## Optional passive voting experiment
 
 Add `--mode vote` to run the requested passive-only experiment. Within the two-second
 trial, collect completed scores from distinct webcam frames, then uniformly sample
 six scores without replacement. Four or more strictly greater than 0.85 gives
-APPROVED; four or more strictly below 0.75 gives REJECTED. Otherwise run the
-random-action challenge, including boundary scores of 0.75 and 0.85. Fewer than
+APPROVED; four or more strictly below 0.75 gives REJECTED. Otherwise return
+REQUEST VERIFICATION, including boundary scores of 0.75 and 0.85. Fewer than
 six finite valid scores gives REQUEST VERIFICATION. Scores completed after the
 deadline are excluded. Selected scores/counts and actual elapsed time print to the
 console; frames stay in memory. This sampling is random among scored frames, not
-all camera frames. Step-up has a separate six-second capture/check budget (400ms
-baseline, snapshot submitted at 5400ms); it is not a two-second authentication.
-Late/unavailable step-up results remain REQUEST VERIFICATION. APPROVED is an
+all camera frames. Voting mode does not run a challenge. Standalone challenge mode
+has a separate six-second budget and is not a two-second authentication. APPROVED is an
 experimental passive vote, not a door authorization or validated spoof verdict.
 The default challenge mode and production pipeline remain unchanged.
 
