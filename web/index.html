@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Entry Kiosk</title>
+  <title>Secure Entry</title>
   <link rel="stylesheet" href="styles.css">
 </head>
-<body data-screen="welcome">
+<body data-screen="home">
   <header class="bar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
@@ -22,61 +22,75 @@
   </header>
 
   <main class="stage">
-    <!-- ============ WELCOME ============ -->
-    <section class="screen screen-welcome" aria-label="Welcome">
-      <h1 class="title">Tap your name to enter</h1>
-      <p class="notice">
-        The camera is used for this check only. One frame goes to AWS Rekognition to match
-        against your enrolled photo. No images are stored after the decision.
-      </p>
-      <div id="names" class="names"></div>
-      <p class="fine">Tapping your name means you agree to this check.</p>
-    </section>
+    <!-- ============ HOME / CAMERA / PROCESSING / CHALLENGE ============ -->
+    <section class="screen screen-camera" aria-label="Face verification">
+      <h1 class="title">Face Verification</h1>
 
-    <!-- ============ CAMERA (capture + challenge) ============ -->
-    <section class="screen screen-camera" aria-label="Camera">
+      <form id="idForm" class="id-row" autocomplete="off">
+        <label for="userId" class="id-label">ID</label>
+        <input id="userId" class="id-input" type="text" inputmode="text" spellcheck="false"
+               placeholder="Enter your ID" maxlength="64" list="enrolledList" aria-describedby="idHelp">
+        <datalist id="enrolledList"></datalist>
+        <button id="verifyBtn" class="btn btn-primary" type="submit">Verify</button>
+      </form>
+      <div id="idHelp" class="id-help" aria-live="polite"></div>
+
       <div class="camera">
         <video id="video" autoplay playsinline muted></video>
-        <div class="guide" aria-hidden="true"><div class="oval"></div></div>
-        <div class="scanline" aria-hidden="true"></div>
-        <div id="camMessage" class="cam-message" hidden></div>
-
-        <!-- challenge prompt overlay -->
+        <div id="camMessage" class="cam-message" hidden>Camera unavailable</div>
+        <!-- challenge prompt (bottom band, does not cover the face) -->
         <div id="prompt" class="prompt" hidden>
-          <div id="promptIcon" class="prompt-icon"></div>
-          <div id="promptWord" class="prompt-word"></div>
+          <span id="promptIcon" class="prompt-icon" aria-hidden="true"></span>
+          <span id="promptWord" class="prompt-word"></span>
         </div>
       </div>
-      <div class="camera-status">
-        <div>
-          <div class="eyebrow" id="capLabel">Checking</div>
-          <div class="cap-name" id="capName"></div>
+
+      <div class="under">
+        <p id="hint" class="hint">Look at the camera to verify your identity</p>
+        <div id="progress" class="progress" hidden>
+          <span id="progressLabel" class="progress-label">Verifying</span>
+          <span class="progress-time"><span id="stopwatch">0.00</span> s</span>
         </div>
-        <div class="stopwatch"><span id="stopwatch">0.00</span><span class="unit">s</span></div>
       </div>
     </section>
 
     <!-- ============ RESULT ============ -->
     <section class="screen screen-result" aria-label="Result" aria-live="polite">
       <div id="resultCard" class="result">
-        <div id="decision" class="decision">ALLOW</div>
-        <div id="reason" class="reason"></div>
-        <div class="timing">
-          <div class="timing-main">Decision in <strong id="decisionTime">0.00</strong> s</div>
-          <div class="timing-split">
-            <span>First pass <strong id="firstPass">0.00 s</strong></span>
-            <span>Total <strong id="total">0.00 s</strong></span>
-          </div>
-        </div>
+        <div class="result-user" id="resultUser"></div>
+        <div id="resultIcon" class="result-icon" aria-hidden="true"></div>
+        <h2 id="resultHeading" class="result-heading"></h2>
+        <p id="resultText" class="result-text"></p>
 
-        <!-- next_action block (MOVE_CLOSER / HOLD_STILL / IMPROVE_LIGHT / RECEPTION / CHALLENGE) -->
+        <dl class="metrics">
+          <div class="metric">
+            <dt>Liveness confidence</dt>
+            <dd id="mLiveness">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Identity similarity</dt>
+            <dd id="mSimilarity">—</dd>
+          </div>
+          <div class="metric">
+            <dt id="mTimeLabel">Decision time</dt>
+            <dd id="mTime">—</dd>
+          </div>
+        </dl>
+        <div id="timingDetail" class="timing-detail"></div>
+
+        <!-- next step (pending results only) -->
         <div id="nextAction" class="next" hidden>
-          <div id="nextIcon" class="next-icon" aria-hidden="true"></div>
+          <span id="nextIcon" class="next-icon" aria-hidden="true"></span>
           <div class="next-body">
             <div id="nextText" class="next-text"></div>
             <div id="nextSub" class="next-sub"></div>
           </div>
-          <button id="retryBtn" class="btn" type="button" hidden>Try again</button>
+        </div>
+
+        <div class="actions">
+          <button id="continueBtn" class="btn btn-primary" type="button" hidden>Continue verification</button>
+          <button id="retryBtn" class="btn btn-primary" type="button" hidden>Try again</button>
+          <button id="homeBtn" class="btn btn-ghost" type="button">Return to main screen</button>
         </div>
         <div id="resultMock" class="result-mock" hidden>MOCK RESPONSE — not a real decision</div>
       </div>
@@ -85,15 +99,15 @@
   </main>
 
   <footer class="foot">
-    <span>Frames are processed in memory and never stored on this device.</span>
+    <span>Identity is matched with AWS Rekognition. This kiosk does not save camera images.</span>
     <span id="attemptInfo" class="mono"></span>
   </footer>
 
-  <!-- ============ OPERATOR PANEL (press "o") ============ -->
+  <!-- ============ OPERATOR PANEL (press "o" outside the ID field) ============ -->
   <aside id="operator" class="operator" hidden>
     <div class="op-head">
       <strong>Operator</strong>
-      <span class="op-hint">press O to hide</span>
+      <span class="op-hint">O / Esc to hide</span>
     </div>
     <label class="op-row">
       <span>Scenario</span>
@@ -107,21 +121,34 @@
         <option value="bad_light">bad_light</option>
       </select>
     </label>
-    <label class="op-row" id="mockNextRow" hidden>
-      <span>Mock next_action</span>
-      <select id="mockNext">
-        <option value="auto">auto (cycle)</option>
-        <option value="NONE">NONE</option>
-        <option value="MOVE_CLOSER">MOVE_CLOSER</option>
-        <option value="HOLD_STILL">HOLD_STILL</option>
-        <option value="IMPROVE_LIGHT">IMPROVE_LIGHT</option>
-        <option value="RETRY">RETRY</option>
-        <option value="CHALLENGE">CHALLENGE</option>
-        <option value="RECEPTION">RECEPTION</option>
-      </select>
-    </label>
+    <div id="mockRows" hidden>
+      <label class="op-row">
+        <span>Mock outcome</span>
+        <select id="mockOutcome">
+          <option value="REQUEST_VERIFICATION">REQUEST_VERIFICATION</option>
+          <option value="ALLOW">ALLOW (UI preview)</option>
+          <option value="DENY_SPOOF">DENY spoof</option>
+          <option value="DENY_MISMATCH">DENY mismatch</option>
+        </select>
+      </label>
+      <label class="op-row">
+        <span>Mock next_action</span>
+        <select id="mockNext">
+          <option value="auto">auto (cycle)</option>
+          <option value="NONE">NONE</option>
+          <option value="MOVE_CLOSER">MOVE_CLOSER</option>
+          <option value="HOLD_STILL">HOLD_STILL</option>
+          <option value="IMPROVE_LIGHT">IMPROVE_LIGHT</option>
+          <option value="RETRY">RETRY</option>
+          <option value="CHALLENGE">CHALLENGE</option>
+          <option value="RECEPTION">RECEPTION</option>
+        </select>
+      </label>
+    </div>
     <div class="op-row"><span>Backend</span><span id="opBackend" class="mono"></span></div>
+    <div class="op-row"><span>Frame encoder</span><span id="opEncoder" class="mono"></span></div>
     <div class="op-row"><span>Last attempt</span><span id="opAttempt" class="mono">—</span></div>
+    <div class="op-row op-stack"><span>Last timings</span><span id="opTimings" class="mono">—</span></div>
   </aside>
 
   <canvas id="canvas" hidden></canvas>
