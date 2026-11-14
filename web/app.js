@@ -44,6 +44,7 @@ const CONFIG = {
   RESULT_RESET_MS: 5000,       // back to home after a final result
   ACTION_RESET_MS: 12000,      // longer when a Continue / Try again button is offered
   REQUEST_TIMEOUT_MS: 8000,
+  STATUS_POLL_MS: 3000,        // operator status table refresh while the panel is open
 };
 
 // ============================================================
@@ -76,6 +77,8 @@ const realApi = {
     ]),
 
   challengeStart: ({ attempt_id }) => postForm(`/attempt/${enc(attempt_id)}/challenge/start`, []),
+
+  status: () => request("/status", { method: "GET" }),
 
   challenge: ({ attempt_id, challenge_id, frames, prompt_ts, baseline_ts }) =>
     postForm(`/attempt/${enc(attempt_id)}/challenge`, [
@@ -155,7 +158,10 @@ const mockApi = {
     log("mock liveness", { attempt_id: f.attempt_id, frames: f.frames.length, capture_ts_ms: f.frames.map((x) => x.ts) });
     await sleep(rand(250, 550));
     const o = els.mockOutcome.value;
-    if (o === "ALLOW") return mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "LIVE", score: 0.94 }, { status: "MATCH", similarity: 99.2, user_id: MOCK_MATCH_ID });
+    if (els.mockMode.value === "OFFLINE") return mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY", { status: "UNCERTAIN", score: 0.55 }, { status: "UNKNOWN", similarity: null });
+    if (els.mockCampus.value === "PROHIBITED") return mockDecision(f.attempt_id, "DENY", "SCHEDULE_DENIED", "NONE", { status: "UNCERTAIN", score: 0.6 }, { status: "MATCH", similarity: 99.2 });
+    // Like the server: the first pass never allows; a clean pass asks for the challenge.
+    if (o === "ALLOW") return mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE", { status: "UNCERTAIN", score: 0.62 }, { status: "MATCH", similarity: 99.2 });
     if (o === "DENY_SPOOF") return mockDecision(f.attempt_id, "DENY", "SPOOF_PASSIVE", "NONE", { status: "SPOOF", score: 0.12 }, { status: "UNKNOWN", similarity: null });
     if (o === "DENY_MISMATCH") return mockDecision(f.attempt_id, "DENY", "ID_MISMATCH", "NONE", { status: "LIVE", score: 0.9 }, { status: "MISMATCH", similarity: 31.5 });
     let next = els.mockNext.value;
@@ -171,7 +177,17 @@ const mockApi = {
   async challenge(f) {
     log("mock challenge", { attempt_id: f.attempt_id, frames: f.frames.length, prompt_ts_ms: f.prompt_ts });
     await sleep(rand(300, 600));
-    return { ...mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "MANUAL_REVIEW", "RECEPTION", { status: "UNCERTAIN", score: 0.5 }, { status: "UNKNOWN", similarity: null }), total_ms: 0 };
+    const id = { status: "MATCH", similarity: 99.1, user_id: MOCK_MATCH_ID };
+    let d;
+    if (els.mockOutcome.value !== "ALLOW") d = mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "CHALLENGE_FAILED", "RECEPTION", { status: "UNCERTAIN", score: 0.5 }, { status: "UNKNOWN", similarity: null });
+    else if (els.mockCampus.value === "PERMITTED") d = mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "UNCERTAIN", score: 0.64 }, id);
+    else d = mockDecision(f.attempt_id, "REQUEST_VERIFICATION", els.mockCampus.value === "APPROVAL_REQUIRED" ? "SCHEDULE_APPROVAL_REQUIRED" : "SCHEDULE_UNKNOWN", "STAFF_VERIFY", { status: "UNCERTAIN", score: 0.64 }, id);
+    return { ...d, total_ms: 0 };
+  },
+  async status() {
+    await sleep(rand(20, 60));
+    return { mode: els.mockMode.value, pending_sync: els.mockMode.value === "OFFLINE" ? 3 : 0, synced: 12,
+             policy_version: "MOCK-2026-11-14.1", kiosk_time: new Date().toISOString().slice(0, 19), demo_clock: false };
   },
 };
 
@@ -179,6 +195,8 @@ function mockDecision(attempt_id, decision, reason_code, next_action, passive, i
   return {
     decision, reason_code, message: "MOCK", next_action, attempt_id,
     signals: { quality: { ok: true, continuity_ok: true }, passive, identity },
+    schedule: { status: els.mockCampus.value, policy_version: "MOCK-2026-11-14.1" },
+    mode: els.mockMode.value,
     stage_ms: { quality: 40, passive: 180, identity_wait: 120, decide: 1 },
     first_pass_server_ms: Math.round(rand(500, 900)),
   };
@@ -192,6 +210,8 @@ const api = CONFIG.USE_MOCK ? mockApi : realApi;
 const REJECT_TEXT = {
   SPOOF_PASSIVE: "Spoof detected. A photo, screen or replay was presented instead of a live person.",
   ID_MISMATCH: "Identity mismatch. The face does not match the enrolled photo.",
+  SCHEDULE_DENIED: "Campus access is not permitted at this time.",
+  STAFF_REJECTED: "Entry denied by staff.",
 };
 const PENDING_TEXT = "We couldn't confidently complete verification.";
 
@@ -208,6 +228,9 @@ const REASON_DETAIL = {
   TIMEOUT: "The check did not finish in time.",
   CHALLENGE_FAILED: "On-screen prompts were not completed.",
   MANUAL_REVIEW: "This entry needs a manual check.",
+  SCHEDULE_APPROVAL_REQUIRED: "Staff approval is needed for entry at this time.",
+  SCHEDULE_UNKNOWN: "Your campus access could not be confirmed.",
+  OFFLINE_STAFF_REQUIRED: "The kiosk is offline. Staff will check your ID.",
 };
 
 const ICON = {
@@ -244,7 +267,12 @@ const NEXT_UI = {
   RETRY: { icon: "retry", text: "Please try again", sub: "Look straight at the camera.", mode: "retry" },
   CHALLENGE: { icon: "shield", text: "One more quick check", sub: "Follow two short prompts on screen.", mode: "continue" },
   RECEPTION: { icon: "desk", text: "Please see reception for manual review", sub: "A member of staff will help you.", mode: null },
+  STAFF_VERIFY: { icon: "desk", text: "Please wait for staff", sub: "A member of staff will check your physical ID.", mode: null },
 };
+
+// Evidence list: fixed wording; a check mark appears only for a positive value the server actually returned.
+const OFFLINE_NOTE = "Central identity service: unavailable \u00b7 Automatic entry: blocked \u00b7 Decision record: queued for sync";
+const MARK = { ok: "\u2713", bad: "\u2717", na: "\u2013" };
 
 // ============================================================
 // DOM + state
@@ -259,12 +287,13 @@ const els = {
   resultCard: $("resultCard"), resultUser: $("resultUser"), resultIcon: $("resultIcon"),
   resultHeading: $("resultHeading"), resultText: $("resultText"),
   mLiveness: $("mLiveness"), mSimilarity: $("mSimilarity"), mTime: $("mTime"), mTimeLabel: $("mTimeLabel"),
-  timingDetail: $("timingDetail"),
+  timingDetail: $("timingDetail"), evidence: $("evidence"), offlineNote: $("offlineNote"),
   nextAction: $("nextAction"), nextIcon: $("nextIcon"), nextText: $("nextText"), nextSub: $("nextSub"),
   continueBtn: $("continueBtn"), retryBtn: $("retryBtn"), homeBtn: $("homeBtn"),
   resultMock: $("resultMock"), resetHint: $("resetHint"), attemptInfo: $("attemptInfo"),
   operator: $("operator"), scenario: $("scenario"), mockRows: $("mockRows"),
-  mockOutcome: $("mockOutcome"), mockNext: $("mockNext"),
+  mockOutcome: $("mockOutcome"), mockNext: $("mockNext"), mockCampus: $("mockCampus"), mockMode: $("mockMode"),
+  opStatus: $("opStatus"), opStatusNote: $("opStatusNote"),
   opBackend: $("opBackend"), opEncoder: $("opEncoder"), opAttempt: $("opAttempt"), opTimings: $("opTimings"),
 };
 
@@ -282,6 +311,8 @@ const state = {
   stopwatchRaf: 0,
   resetTimer: 0,
   resetTick: 0,
+  statusTimer: 0,
+  statusSeq: 0,
 };
 
 class Cancelled extends Error {}
@@ -557,14 +588,19 @@ async function runChallenge() {
 // ============================================================
 // Result rendering
 // ============================================================
-/** APPROVED only when the server says ALLOW and its own signals confirm LIVE + MATCH. */
+/**
+ * APPROVED only when the server says ALLOW and backs it up: OK_LIVE_MATCH (only reachable after a
+ * passed challenge) with its own identity MATCH and campus PERMITTED (must be returned), or a staff ID check.
+ * Passive LIVE is not required: the server's calibration gate failed, so passive never approves.
+ */
 function classify(d) {
   const s = d?.signals || {};
-  const live = s.passive?.status === "LIVE";
   const match = s.identity?.status === "MATCH";
+  const campusOk = d?.schedule?.status === "PERMITTED";
   if (d?.decision === "ALLOW") {
-    if (live && match) return "approved";
-    log("ALLOW without LIVE+MATCH signals — shown as pending", d);
+    if (d.reason_code === "OK_LIVE_MATCH" && match && campusOk && d.mode !== "OFFLINE") return "approved";
+    if (d.reason_code === "STAFF_VERIFIED") return "approved";
+    log("ALLOW without the backing signals \u2014 shown as pending", d);
     return "pending";
   }
   if (d?.decision === "DENY") return "rejected";
@@ -602,6 +638,8 @@ async function renderResult(d, flow, phase) {
     const detail = REASON_DETAIL[d?.reason_code];
     els.resultText.textContent = detail ? `${PENDING_TEXT} ${detail}` : PENDING_TEXT;
   }
+
+  renderEvidence(evidenceFor(d, phase, kind), d?.mode === "OFFLINE");
 
   const s = d?.signals || {};
   els.mLiveness.textContent = pct(s.passive?.score, 1);
@@ -664,6 +702,47 @@ function timingDetail(d, phase, elapsed) {
   return parts.join(" · ");
 }
 
+/** [label, tone, value, policy] rows, from the server's response only. */
+function evidenceFor(d, phase, kind) {
+  const rc = d?.reason_code;
+  const id = d?.signals?.identity?.status;
+  const identity = id === "MATCH" ? ["ok", "confirmed"]
+    : (id === "MISMATCH" || rc === "ID_MISMATCH") ? ["bad", "not confirmed"]
+    : ["na", "unavailable"];
+
+  // The server returns no challenge status, only reason codes. Completed: OK_LIVE_MATCH, or the
+  // schedule codes it returns after a challenge only once biometrics passed (api/decide.py).
+  // Failed: CHALLENGE_FAILED / a challenge-phase TIMEOUT.
+  const passedThenSchedule = phase === "final" && (rc === "SCHEDULE_APPROVAL_REQUIRED" || rc === "SCHEDULE_UNKNOWN");
+  const challenge = ((d?.decision === "ALLOW" && rc === "OK_LIVE_MATCH") || passedThenSchedule) ? ["ok", "completed"]
+    : (phase === "final" && (rc === "CHALLENGE_FAILED" || rc === "TIMEOUT")) ? ["bad", "failed"]
+    : ["na", "required"];
+
+  const sc = d?.schedule?.status;
+  const campus = sc === "PERMITTED" ? ["ok", "permitted"]
+    : sc === "PROHIBITED" ? ["bad", "not permitted now"]
+    : ["na", "staff approval required"];   // APPROVAL_REQUIRED, UNKNOWN or not returned
+
+  const entry = kind === "approved" ? ["ok", "ALLOWED"] : ["bad", "BLOCKED"];
+  return [["Identity", ...identity], ["Interactive challenge", ...challenge],
+          ["Campus access", ...campus, d?.schedule?.policy_version], ["Entry", ...entry]];
+}
+
+function renderEvidence(rows, offline) {
+  els.evidence.replaceChildren(...rows.map(([label, tone, value, policy]) => {
+    const li = document.createElement("li");
+    li.className = `ev ev-${tone}`;
+    const mark = document.createElement("span"); mark.className = "ev-mark"; mark.textContent = MARK[tone];
+    const l = document.createElement("span"); l.className = "ev-label"; l.textContent = label;
+    const v = document.createElement("span"); v.className = "ev-value"; v.textContent = value;
+    if (policy) { const n = document.createElement("span"); n.className = "ev-note"; n.textContent = `policy ${policy}`; v.append(" ", n); }
+    li.append(mark, l, v);
+    return li;
+  }));
+  els.offlineNote.hidden = !offline;
+  els.offlineNote.textContent = OFFLINE_NOTE;
+}
+
 function renderNext(ui) {
   els.nextAction.hidden = !ui;
   if (!ui) return;
@@ -687,6 +766,7 @@ async function renderFailure(flow, err) {
         ? `${PENDING_TEXT} The server does not support face-only identification yet.`
         : `${PENDING_TEXT} The ID was not accepted.`)
     : `${PENDING_TEXT} The verification service could not be reached.`;
+  renderEvidence(evidenceFor(null, "first", "pending"), false);
   els.mLiveness.textContent = "—";
   els.mSimilarity.textContent = "—";
   els.mTimeLabel.textContent = "Decision time";
@@ -776,15 +856,50 @@ function setupOperator() {
   els.opBackend.textContent = CONFIG.USE_MOCK ? "MOCK" : (CONFIG.API_BASE || location.origin);
   els.opEncoder.textContent = encoder.name;
 
+  const setOpen = (open) => {
+    els.operator.hidden = !open;
+    clearInterval(state.statusTimer);
+    if (open) { refreshStatus(); state.statusTimer = setInterval(refreshStatus, CONFIG.STATUS_POLL_MS); }
+  };
   document.addEventListener("keydown", (e) => {
     const t = e.target;
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) {
-      if (e.key === "Escape") els.operator.hidden = true;
+      if (e.key === "Escape") setOpen(false);
       return;
     }
-    if (e.key === "o" || e.key === "O") els.operator.hidden = !els.operator.hidden;
-    if (e.key === "Escape") els.operator.hidden = true;
+    if (e.key === "o" || e.key === "O") setOpen(els.operator.hidden);
+    if (e.key === "Escape") setOpen(false);
   });
+  els.mockMode.addEventListener("change", () => { if (!els.operator.hidden) refreshStatus(); });
+}
+
+/** GET /status -> status table. Shows only what the server returned; a failure shows as unreachable. */
+async function refreshStatus() {
+  const seq = ++state.statusSeq;
+  let st = null, err = null;
+  try { st = await api.status(); } catch (e) { err = e; }
+  if (seq !== state.statusSeq) return;   // a newer poll already answered
+  const m = st?.mode;
+  const passiveOn = st?.passive_allow_enabled === true;
+  const rows = st ? [
+    // Not in /status today: pinned off in api/config.py after the passive calibration gate (NO-GO, 14 Nov).
+    ["Passive-only approval", passiveOn ? "ENABLED" : "DISABLED: calibration gate failed", passiveOn ? "ok" : "bad"],
+    ["Interactive challenge", "REQUIRED", "na"],
+    ["Identity service", m === "ONLINE" ? "available" : m === "OFFLINE" ? "unavailable" : "unknown", m === "ONLINE" ? "ok" : "bad"],
+    ["Campus policy", st.policy_version ? `loaded \u00b7 ${st.policy_version}` : "not loaded", st.policy_version ? "ok" : "bad"],
+    ["Audit queue", `${st.pending_sync ?? "?"} pending \u00b7 ${st.synced ?? "?"} synced`, st.pending_sync ? "na" : "ok"],
+    ["Mode", m || "unknown", m === "ONLINE" ? "ok" : "bad"],
+    ["Demo clock", `${st.demo_clock ? "ON" : "off"} \u00b7 ${st.kiosk_time || "?"}`, st.demo_clock ? "na" : "ok"],
+  ] : [["Status", "unreachable", "bad"]];
+  els.opStatus.replaceChildren(...rows.map(([k, v, tone]) => {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th"); th.textContent = k;
+    const td = document.createElement("td"); td.textContent = v; td.className = `st-${tone}`;
+    tr.append(th, td);
+    return tr;
+  }));
+  els.opStatusNote.textContent = err ? String(err.message || err)
+    : `GET /status \u00b7 ${new Date().toLocaleTimeString()}${CONFIG.USE_MOCK ? " \u00b7 MOCK" : ""}`;
 }
 
 // ============================================================

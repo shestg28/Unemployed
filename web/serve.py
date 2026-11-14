@@ -3,7 +3,7 @@
     python web/serve.py                         # http://localhost:8765, API at http://127.0.0.1:8000
     python web/serve.py --port 8765 --api http://127.0.0.1:8000
 
-Standard library only. Proxies POST /attempt/... and POST /verify; everything else is a static file.
+Standard library only. Proxies POST /attempt/..., POST /verify and GET /status; everything else is a static file.
 Request bodies are streamed through and never written to disk.
 """
 import argparse
@@ -26,13 +26,21 @@ def make_handler(api_base: str):
             self.send_header("Cache-Control", "no-store")
             super().end_headers()
 
+        def do_GET(self):
+            if self.path == "/status":
+                self._proxy("GET", None)
+            else:
+                super().do_GET()
+
         def do_POST(self):
             if not self.path.startswith(PROXY_PREFIXES):
                 self.send_error(404)
                 return
             length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
-            req = urllib.request.Request(api_base + self.path, data=body, method="POST")
+            self._proxy("POST", self.rfile.read(length) if length else b"")
+
+        def _proxy(self, method, body):
+            req = urllib.request.Request(api_base + self.path, data=body, method=method)
             for k, v in self.headers.items():
                 if k.lower() not in HOP_HEADERS:
                     req.add_header(k, v)

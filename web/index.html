@@ -62,6 +62,10 @@
         <h2 id="resultHeading" class="result-heading"></h2>
         <p id="resultText" class="result-text"></p>
 
+        <!-- evidence: one line per check, from the server's response only -->
+        <ul id="evidence" class="evidence" aria-label="Verification evidence"></ul>
+        <div id="offlineNote" class="offline-note" hidden></div>
+
         <dl class="metrics">
           <div class="metric">
             <dt>Liveness confidence</dt>
@@ -109,6 +113,8 @@
       <strong>Operator</strong>
       <span class="op-hint">O / Esc to hide</span>
     </div>
+    <table class="op-status"><tbody id="opStatus"></tbody></table>
+    <div id="opStatusNote" class="op-status-note mono"></div>
     <label class="op-row">
       <span>Scenario</span>
       <select id="scenario">
@@ -142,6 +148,22 @@
           <option value="RETRY">RETRY</option>
           <option value="CHALLENGE">CHALLENGE</option>
           <option value="RECEPTION">RECEPTION</option>
+        </select>
+      </label>
+      <label class="op-row">
+        <span>Mock campus</span>
+        <select id="mockCampus">
+          <option value="PERMITTED">PERMITTED</option>
+          <option value="PROHIBITED">PROHIBITED</option>
+          <option value="APPROVAL_REQUIRED">APPROVAL_REQUIRED</option>
+          <option value="UNKNOWN">UNKNOWN</option>
+        </select>
+      </label>
+      <label class="op-row">
+        <span>Mock mode</span>
+        <select id="mockMode">
+          <option value="ONLINE">ONLINE</option>
+          <option value="OFFLINE">OFFLINE</option>
         </select>
       </label>
     </div>

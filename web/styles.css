@@ -173,6 +173,25 @@ body[data-screen="challenge"] .hint { display: none; }
 .result.rejected .result-icon, .result.rejected .result-heading { color: var(--deny); }
 .result.pending  .result-icon, .result.pending  .result-heading { color: var(--review); }
 
+.evidence {
+  list-style: none; margin: 26px auto 0; max-width: 560px; text-align: left;
+  border-radius: 16px; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--line);
+}
+.ev { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 12px; padding: 12px 18px; font-size: 19px; }
+.ev + .ev { border-top: 1px solid var(--line); }
+.ev-mark { font-size: 22px; font-weight: 800; text-align: center; }
+.ev-label { color: var(--muted); }
+.ev-value { font-weight: 650; text-align: right; }
+.ev-note { font: 500 12px var(--mono); color: var(--faint); }
+.ev-ok .ev-mark, .ev-ok .ev-value { color: var(--allow); }
+.ev-bad .ev-mark, .ev-bad .ev-value { color: var(--deny); }
+.ev-na .ev-mark { color: var(--faint); }
+.ev-na .ev-value { color: var(--review); }
+.offline-note {
+  margin: 12px auto 0; max-width: 560px; padding: 10px 14px; border-radius: 12px;
+  border: 1px dashed var(--review); color: var(--review); font-size: 15px; line-height: 1.5;
+}
+
 .metrics {
   margin-top: 30px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
 }
@@ -220,6 +239,14 @@ body[data-screen="challenge"] .hint { display: none; }
 }
 .op-row .mono { color: var(--text); font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-stack { flex-direction: column; align-items: flex-start; }
+.op-status { width: 100%; border-collapse: collapse; font-size: 13px; }
+.op-status th { text-align: left; font-weight: 500; color: var(--muted); padding: 5px 8px 5px 0; vertical-align: top; }
+.op-status td { text-align: right; font: 600 12px var(--mono); padding: 5px 0; word-break: break-word; }
+.op-status tr + tr { border-top: 1px solid var(--line); }
+.st-ok { color: var(--allow); }
+.st-bad { color: var(--deny); }
+.st-na { color: var(--review); }
+.op-status-note { margin: 4px 0 10px; padding-bottom: 10px; border-bottom: 1px dashed #3a4554; color: var(--faint); font-size: 11px; word-break: break-word; }
 .op-stack .mono { max-width: 100%; white-space: normal; word-break: break-word; }
 
 /* ---------- motion ---------- */
