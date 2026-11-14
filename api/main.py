@@ -15,7 +15,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import config, identity, mode, outbox, schedule, signals, sync_worker
@@ -49,12 +53,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="HID liveness", lifespan=lifespan)
 
+# Local kiosk front-ends (Shesh's /web dev server, any port) may call the API.
+# Only http://localhost:* and http://127.0.0.1:* -- no other origins.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 
 # --- helpers ------------------------------------------------------------------
 
-def _read_frames(files: list[UploadFile]) -> list[bytes]:
-    if not 1 <= len(files) <= config.MAX_FRAMES:
-        raise HTTPException(400, f"send 1-{config.MAX_FRAMES} frames")
+def _read_frames(files: list[UploadFile], max_frames: int | None = None) -> list[bytes]:
+    max_frames = max_frames or config.MAX_FRAMES
+    if not 1 <= len(files) <= max_frames:
+        raise HTTPException(400, f"send 1-{max_frames} frames")
     data = [f.file.read() for f in files]
     if any(not b or len(b) > config.MAX_FRAME_BYTES for b in data):
         raise HTTPException(400, "each frame must be a non-empty image under 5 MB")
@@ -354,7 +368,7 @@ def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
         return at.challenge_decision
     elapsed_ms = (time.monotonic() - at.challenge["started_mono"]) * 1000
     timed_out = elapsed_ms > config.CHALLENGE_TIMEOUT_MS + CHALLENGE_UPLOAD_GRACE_MS
-    data = _read_frames(frames)
+    data = _read_frames(frames, config.MAX_CHALLENGE_FRAMES)
     try:
         ts = _parse_ts(capture_ts_ms, len(data))
         prompt_ts = _parse_ts([prompt_ts_ms] if prompt_ts_ms else [], 1)[0]
@@ -492,6 +506,22 @@ def status() -> dict:
                                  else "unavailable"),
             "policy": pol,
             "audit_queue": {"pending": pending, "synced": synced}}
+
+
+# --- fallback demo page (integrator override; Shesh's kiosk replaces it) ---------------
+
+_STATIC = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/demo", include_in_schema=False)
+def demo_page():
+    return FileResponse(_STATIC / "demo.html", media_type="text/html")
+
+
+@app.get("/demo/users", include_in_schema=False)
+def demo_users() -> dict:
+    """Enrolled user ids for the demo name buttons (ids only, never photos)."""
+    return {"users": identity.enrolled_ids()}
 
 
 # --- v3: operator demo clock ---------------------------------------------------------

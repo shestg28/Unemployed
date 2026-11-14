@@ -235,6 +235,8 @@ MESSAGES = {
 def message_for(reason: str, next_action: str) -> str:
     if next_action == "RECEPTION":
         return "Please see reception."
+    if next_action == "CHALLENGE":
+        return "One more quick check, please."
     if next_action == "STAFF_VERIFY" and reason not in MESSAGES:
         return "Please wait for staff to verify your ID."
     return MESSAGES.get(reason, "Please try again.")

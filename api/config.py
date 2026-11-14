@@ -54,6 +54,7 @@ ID_MISMATCH = _num("ID_MISMATCH", 50)  # < (face found, adequate quality) -> MIS
 
 # --- Request limits ------------------------------------------------------------
 MAX_FRAMES = 16  # ~14 frames at ~10 fps over ~1.4 s
+MAX_CHALLENGE_FRAMES = 50  # step-up: ~0.4 s baseline + 4 s at 10 fps
 MAX_FRAME_BYTES = 5 * 1024 * 1024  # Rekognition's image-bytes limit
 
 # --- Logging -------------------------------------------------------------------

@@ -118,6 +118,13 @@ def load_enrolled() -> int:
     return len(refs)
 
 
+def enrolled_ids() -> list[str]:
+    if not _loaded:
+        load_enrolled()
+    with _enrolled_lock:
+        return sorted(_ENROLLED)
+
+
 def reference_for(user_id: str) -> bytes | None:
     if not _loaded:
         load_enrolled()

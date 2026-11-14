@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HID Kiosk Demo</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --text: #eef0f4; --muted: #9aa3b2; --line: #2a2f3a;
+    --allow: #1f9d55; --stepup: #d98e04; --deny: #d64545; --accent: #4c8dff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status .demo-clock { color: var(--stepup); font-weight: 700; }
+  .stage { position: relative; margin: 14px 0; background: #000; border-radius: 14px; overflow: hidden;
+           aspect-ratio: 4 / 3; max-height: 62vh; width: 100%; }
+  video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+  #prompt { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            font-size: clamp(48px, 11vw, 120px); font-weight: 900; letter-spacing: .03em;
+            text-shadow: 0 4px 24px rgba(0,0,0,.8); pointer-events: none; text-align: center; padding: 0 12px; }
+  #rec { position: absolute; top: 12px; left: 12px; font-size: 13px; background: rgba(0,0,0,.55);
+         padding: 4px 10px; border-radius: 999px; display: none; }
+  #rec::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                 background: var(--deny); margin-right: 6px; vertical-align: middle; }
+  .names { display: flex; gap: 10px; flex-wrap: wrap; }
+  .names button, .btn { font: inherit; font-size: 18px; font-weight: 700; padding: 14px 22px; border-radius: 12px;
+           border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; min-width: 120px; }
+  .names button:hover, .btn:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #result { margin-top: 14px; border-radius: 14px; padding: 18px 20px; background: var(--panel); display: none; }
+  #result .decision { font-size: clamp(30px, 6vw, 52px); font-weight: 900; line-height: 1.1; }
+  #result.allow { background: color-mix(in srgb, var(--allow) 22%, var(--panel)); border: 2px solid var(--allow); }
+  #result.allow .decision { color: #5ee08f; }
+  #result.stepup { background: color-mix(in srgb, var(--stepup) 20%, var(--panel)); border: 2px solid var(--stepup); }
+  #result.stepup .decision { color: #ffc24d; }
+  #result.deny { background: color-mix(in srgb, var(--deny) 22%, var(--panel)); border: 2px solid var(--deny); }
+  #result.deny .decision { color: #ff7a7a; }
+  #result .reason { font-size: 18px; margin-top: 6px; }
+  #result .timing { font-size: 22px; font-weight: 700; margin-top: 8px; }
+  #result .detail { color: var(--muted); font-size: 13px; margin-top: 8px; word-break: break-word; }
+  #staff { display: none; margin-top: 12px; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #staff input[type=password], #staff input[type=text] { font: inherit; padding: 10px 12px; border-radius: 10px;
+           border: 1px solid var(--line); background: #0b0d11; color: var(--text); }
+  #staff label { display: flex; gap: 6px; align-items: center; }
+  #msg { color: var(--muted); margin-top: 8px; min-height: 1.4em; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>HID entry kiosk &middot; fallback demo</h1>
+    <div id="status">status: loading&hellip;</div>
+  </header>
+
+  <div class="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="rec">capturing</div>
+    <div id="prompt"></div>
+  </div>
+
+  <div class="names" id="names"></div>
+  <div id="msg">Starting camera&hellip;</div>
+
+  <section id="result" aria-live="polite">
+    <div class="decision" id="decision"></div>
+    <div class="reason" id="reason"></div>
+    <div class="timing" id="timing"></div>
+    <div class="detail" id="detail"></div>
+    <div id="staff">
+      <input type="password" id="pin" placeholder="Operator PIN" inputmode="numeric" autocomplete="off">
+      <label><input type="checkbox" id="idchecked"> ID checked</label>
+      <input type="text" id="sreason" placeholder="Reason (e.g. campus ID card)" size="28">
+      <button class="btn" id="approve">Approve</button>
+      <button class="btn" id="reject">Reject</button>
+    </div>
+  </section>
+
+  <footer>Frames stay in memory and are sent only to this backend. Preview is mirrored; frames are sent unmirrored.</footer>
+</main>
+
+<script>
+(() => {
+  const FPS = 10, QUICK_TOTAL = 14, PRE_PROMPT = 3, JPEG_Q = 0.85;
+  const STEPUP_BASELINE_MS = 400, STEPUP_STEP_MS = 2000, STEPUP_WINDOW_MS = 4000;
+  const LABEL = { SMILE: "SMILE", OPEN_MOUTH: "OPEN MOUTH", TURN_LEFT: "TURN LEFT", TURN_RIGHT: "TURN RIGHT" };
+  const $ = (id) => document.getElementById(id);
+  const video = $("video"), canvas = document.createElement("canvas"), ctx = canvas.getContext("2d");
+  const ring = [];             // {blob, ts} sampled continuously at 10 fps (camera is ALWAYS capturing)
+  let busy = false, current = null;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const msg = (t) => { $("msg").textContent = t; };
+  const prompt = (t) => { $("prompt").textContent = t || ""; };
+
+  async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }, audio: false });
+    video.srcObject = stream;
+    await new Promise((r) => (video.readyState >= 2 ? r() : (video.onloadeddata = r)));
+    canvas.width = video.videoWidth || 640; canvas.height = video.videoHeight || 480;
+    setInterval(sample, 1000 / FPS);
+    msg("Tap your name to enter.");
+  }
+
+  function sample() {
+    if (video.readyState < 2) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);   // UNMIRRORED (CSS mirrors the preview only)
+    const ts = Date.now();
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      ring.push({ blob, ts });
+      while (ring.length > 80) ring.shift();
+    }, "image/jpeg", JPEG_Q);
+  }
+
+  const framesBetween = (t0, t1) => ring.filter((f) => f.ts >= t0 && f.ts <= t1);
+  const latest = () => ring[ring.length - 1];
+
+  function formWith(frames, extra) {
+    const fd = new FormData();
+    frames.forEach((f, i) => { fd.append("frames", f.blob, `f${i}.jpg`); fd.append("capture_ts_ms", String(f.ts)); });
+    Object.entries(extra || {}).forEach(([k, v]) => fd.append(k, String(v)));
+    return fd;
+  }
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}: ${body.detail || JSON.stringify(body)}`);
+    return body;
+  }
+
+  function show(res, tapT, extraTiming) {
+    const box = $("result");
+    const cls = res.decision === "ALLOW" ? "allow" : res.decision === "DENY" ? "deny" : "stepup";
+    box.className = cls; box.style.display = "block";
+    $("decision").textContent = res.decision === "REQUEST_VERIFICATION" ? "STEP-UP VERIFICATION" : res.decision;
+    $("reason").textContent = `${res.message || ""}  (${res.reason_code}${res.next_action && res.next_action !== "NONE" ? " → " + res.next_action : ""})`;
+    const secs = ((performance.now() - tapT) / 1000).toFixed(2);
+    $("timing").textContent = extraTiming ? `${extraTiming} ${secs} s` : `Decision in ${secs} s`;
+    const s = res.signals || {};
+    const parts = [];
+    if (s.identity) parts.push(`identity ${s.identity.status}${s.identity.similarity != null ? " " + s.identity.similarity : ""}`);
+    if (s.challenge) parts.push(`action ${s.challenge.action} ${s.challenge.status}`);
+    if (s.passive) parts.push(`passive ${s.passive.status}${s.passive.score != null ? " " + s.passive.score : ""} (log-only)`);
+    if (s.quality) parts.push(`quality ${s.quality.ok === true ? "OK" : s.quality.fail_reason || "n/a"}`);
+    if (res.schedule) parts.push(`schedule ${res.schedule.status}`);
+    if (res.mode) parts.push(res.mode);
+    if (res.stage_ms) parts.push(`stage_ms ${JSON.stringify(res.stage_ms)}`);
+    if (res.first_pass_server_ms != null) parts.push(`server first pass ${res.first_pass_server_ms} ms`);
+    if (res.total_ms != null) parts.push(`server total ${res.total_ms} ms`);
+    if (res.staff) parts.push(`staff ${res.staff.operator_id} (${res.staff.method})`);
+    $("detail").textContent = parts.join(" · ");
+    $("staff").style.display = res.next_action === "STAFF_VERIFY" ? "flex" : "none";
+  }
+
+  async function attempt(userId) {
+    if (busy) return;
+    if (ring.length < PRE_PROMPT) { msg("Camera warming up — try again in a second."); return; }
+    busy = true; setButtons(false); $("result").style.display = "none"; prompt("");
+    const tapT = performance.now();
+    try {
+      const start = await api("/attempt/start", { method: "POST", headers: { "content-type": "application/json" },
+                                                    body: JSON.stringify({ user_id: userId, consent: true }) });
+      current = { id: start.attempt_id, tapT };
+      // Identity: first frame, fired WITHOUT awaiting.
+      const first = latest();
+      const idfd = new FormData(); idfd.append("frame", first.blob, "id.jpg"); idfd.append("capture_ts_ms", String(first.ts));
+      fetch(`/attempt/${start.attempt_id}/identity`, { method: "POST", body: idfd }).catch(() => {});
+      // Prompt the quick action NOW; the ring already holds pre-prompt frames.
+      prompt(LABEL[start.action] || start.action);
+      const promptTs = Date.now();
+      $("rec").style.display = "block"; msg("");
+      const need = QUICK_TOTAL - PRE_PROMPT;
+      await sleep(need * (1000 / FPS) + 60);
+      const pre = framesBetween(promptTs - 1000, promptTs - 1).slice(-PRE_PROMPT);
+      const post = framesBetween(promptTs, promptTs + 5000).slice(0, need);
+      $("rec").style.display = "none"; prompt("");
+      const res = await api(`/attempt/${start.attempt_id}/liveness`, { method: "POST",
+        body: formWith(pre.concat(post), { prompt_ts_ms: promptTs, scenario: "demo_page" }) });
+      show(res, tapT);
+      if (res.next_action === "CHALLENGE") await stepUp(start.attempt_id, tapT);
+    } catch (e) {
+      prompt(""); $("rec").style.display = "none"; msg(String(e.message || e));
+    } finally {
+      busy = false; setButtons(true); refreshStatus();
+    }
+  }
+
+  async function stepUp(id, tapT) {
+    await sleep(1200);   // let the visitor read the STEP-UP result
+    const ch = await api(`/attempt/${id}/challenge/start`, { method: "POST" });
+    msg("One more check — follow the prompts.");
+    $("rec").style.display = "block";
+    await sleep(Math.max(STEPUP_BASELINE_MS, ch.baseline_ms || 0));   // baseline frames before the prompt
+    const promptTs = Date.now();
+    for (let i = 0; i < ch.actions.length; i++) {
+      prompt(`${i + 1}/${ch.actions.length}  ${LABEL[ch.actions[i]] || ch.actions[i]}`);
+      await sleep(STEPUP_STEP_MS);
+    }
+    const rest = STEPUP_WINDOW_MS - ch.actions.length * STEPUP_STEP_MS;
+    if (rest > 0) await sleep(rest);
+    await sleep(60);
+    $("rec").style.display = "none"; prompt("");
+    const frames = framesBetween(promptTs - STEPUP_BASELINE_MS, promptTs + STEPUP_WINDOW_MS).slice(-50);
+    const res = await api(`/attempt/${id}/challenge`, { method: "POST",
+      body: formWith(frames, { prompt_ts_ms: promptTs, challenge_id: ch.challenge_id }) });
+    msg("");
+    show(res, tapT, "Total time");
+  }
+
+  async function staff(approve) {
+    if (!current) return;
+    try {
+      const res = await api(`/attempt/${current.id}/staff_verify`, { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operator_pin: $("pin").value, id_checked: $("idchecked").checked,
+                               reason: $("sreason").value, approve }) });
+      $("pin").value = "";
+      show(res, current.tapT, "Total time");
+    } catch (e) { msg(String(e.message || e)); }
+    refreshStatus();
+  }
+
+  function setButtons(on) { document.querySelectorAll(".names button").forEach((b) => (b.disabled = !on)); }
+
+  async function loadUsers() {
+    let users = [];
+    try { users = (await api("/demo/users")).users; } catch (e) { users = []; }
+    if (!users.includes("akash")) users.unshift("akash");
+    const box = $("names"); box.innerHTML = "";
+    users.forEach((u) => {
+      const b = document.createElement("button");
+      b.textContent = u.charAt(0).toUpperCase() + u.slice(1);
+      b.onclick = () => attempt(u);
+      box.appendChild(b);
+    });
+  }
+
+  async function refreshStatus() {
+    try {
+      const s = await api("/status");
+      const pol = s.policy ? `policy ${s.policy.status} ${s.policy.version || ""}` : "";
+      const q = s.audit_queue || { pending: s.pending_sync, synced: s.synced };
+      $("status").innerHTML = `<b>${s.mode}</b> · audit ${q.pending} pending / ${q.synced} synced · ${pol}` +
+        ` · identity ${s.identity_service || "?"}` + (s.demo_clock ? ` · <span class="demo-clock">DEMO CLOCK ${s.kiosk_time}</span>` : "");
+    } catch (e) { $("status").textContent = "status unavailable"; }
+  }
+
+  $("approve").onclick = () => staff(true);
+  $("reject").onclick = () => staff(false);
+  loadUsers(); refreshStatus(); setInterval(refreshStatus, 3000);
+  startCamera().catch((e) => msg(`Camera unavailable: ${e.name || e}. Allow camera access and reload.`));
+})();
+</script>
+</body>
+</html>
