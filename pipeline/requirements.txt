@@ -1,2 +1,8 @@
 boto3
 pillow
+numpy
+# One OpenCV package only. mediapipe depends on opencv-contrib-python and, unpinned, pulls 5.x,
+# which removed cv2.dnn.readNetFromCaffe (Silent-Face detector). Pin the contrib build to 4.x.
+opencv-contrib-python>=4.8,<5
+torch        # CPU build is enough; Silent-Face models are .pth
+mediapipe    # FaceLandmarker (Tasks API) for the pass-2 challenge
