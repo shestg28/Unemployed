@@ -1,27 +1,356 @@
-"""HTTP wrapper around the liveness pipeline.
+"""HTTP API: v2 attempt flow + v1 /verify, all decided by api.decide.decide().
 
 Run from the repo root:  uvicorn api.main:app --port 8000
+
+Nothing in the decision path calls pipeline.liveness.fuse() or motion.py.
 """
+import logging
+import random
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
-from pipeline import verify as run_verify
+from . import config, identity, signals
+from .attempt_log import late_result, write_decision
+from .decide import decide, message_for
+from .store import STORE, Attempt, identity_snapshot, now_ms
 
-MAX_FRAMES = 10
-MAX_FRAME_BYTES = 5 * 1024 * 1024  # Rekognition's limit for image bytes
+log = logging.getLogger("api")
+_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="api")
+CHALLENGE_UPLOAD_GRACE_MS = 2000
 
-app = FastAPI(title="HID liveness")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    identity.load_enrolled()   # reference bytes, once
+    identity.init_client()     # shared boto3 client, once
+    stubs = signals.stubs_in_use()
+    if stubs:
+        log.warning("STUB pipeline functions in use (never ALLOW): %s", stubs)
+    yield
+
+
+app = FastAPI(title="HID liveness", lifespan=lifespan)
+
+
+# --- helpers ------------------------------------------------------------------
+
+def _read_frames(files: list[UploadFile]) -> list[bytes]:
+    if not 1 <= len(files) <= config.MAX_FRAMES:
+        raise HTTPException(400, f"send 1-{config.MAX_FRAMES} frames")
+    data = [f.file.read() for f in files]
+    if any(not b or len(b) > config.MAX_FRAME_BYTES for b in data):
+        raise HTTPException(400, "each frame must be a non-empty image under 5 MB")
+    return data
+
+
+def _parse_ts(values: list[str] | None, n: int) -> list[int]:
+    """Accept repeated fields or one comma-separated field. Pads with 0s."""
+    out: list[int] = []
+    for v in values or []:
+        for part in str(v).split(","):
+            part = part.strip()
+            if part:
+                try:
+                    out.append(int(float(part)))
+                except ValueError:
+                    raise HTTPException(400, "capture_ts_ms must be integers")
+    return (out + [0] * n)[:n]
+
+
+def _get_attempt(attempt_id: str) -> Attempt:
+    at = STORE.get(attempt_id)
+    if at is None:
+        raise HTTPException(404, "unknown attempt_id")
+    return at
+
+
+def _labels_future(frame: bytes):
+    """Optional, flag-gated detect_labels. Logged only; never decides."""
+    if not config.LABELS_SIGNAL_ENABLED:
+        return None
+    from pipeline.liveness import _call_labels, get_client
+    return _EXECUTOR.submit(lambda: _call_labels(get_client(), frame))
+
+
+def _labels_result(fut) -> list | None:
+    if fut is None or not fut.done():
+        return None
+    try:
+        return fut.result(timeout=0)
+    except Exception:
+        return None
+
+
+def _quality_and_passive(frames: list[bytes], ts: list[int]) -> tuple[dict, dict, dict]:
+    t = time.perf_counter()
+    q = signals.quality(frames)
+    t_q = time.perf_counter()
+    idx = signals.select_frames(frames, ts)  # quality + spacing only
+    p = signals.passive_liveness([frames[i] for i in idx])
+    t_p = time.perf_counter()
+    stage = {"quality": int((t_q - t) * 1000), "passive": int((t_p - t_q) * 1000)}
+    return q, p, stage
+
+
+def _quality_view(q: dict | None) -> dict:
+    q = q or {}
+    return {"ok": q.get("ok"), "fail_reason": q.get("fail_reason"),
+            "continuity_ok": q.get("continuity_ok"),
+            "per_frame": q.get("per_frame", []), "stub": bool(q.get("stub"))}
+
+
+def _identity_view(ident: dict | None) -> dict:
+    if ident is None:
+        return {"status": "UNKNOWN", "similarity": None, "note": "not_received_by_deadline"}
+    return {"status": ident.get("identity", "UNKNOWN"),
+            "similarity": ident.get("similarity"), "note": ident.get("note")}
+
+
+def _decision_signals(q, p, ident, challenge=None) -> dict:
+    return {
+        "quality": q if isinstance(q, dict) and isinstance(q.get("ok"), bool) else None,
+        "passive": p,
+        "identity": None if ident is None else
+                    {"status": ident.get("identity"), "similarity": ident.get("similarity")},
+        "challenge": challenge,
+        "passive_allow_enabled": config.PASSIVE_ALLOW_ENABLED,
+    }
+
+
+def _log(at_id, user_id, scenario, phase, d, q, p, ident, stage, first_ms, total_ms,
+         challenge=None, labels=None):
+    write_decision({
+        "attempt_id": at_id, "user_id": user_id, "scenario": scenario, "phase": phase,
+        "decision": d[0], "reason": d[1], "next_action": d[2],
+        "scores": {
+            "quality_ok": (q or {}).get("ok"),
+            "continuity_ok": (q or {}).get("continuity_ok"),
+            "passive_status": (p or {}).get("status"),
+            "passive_score": (p or {}).get("score"),
+            "identity_status": _identity_view(ident)["status"],
+            "identity_similarity": _identity_view(ident)["similarity"],
+            "challenge_status": (challenge or {}).get("status"),
+            "labels": labels,
+        },
+        "stubs": signals.stubs_in_use(),
+        "stage_ms": stage, "first_pass_ms": first_ms, "total_ms": total_ms,
+    })
+
+
+# --- v2: attempt flow -------------------------------------------------------------
+
+class StartBody(BaseModel):
+    user_id: str
+    consent: bool
+
+
+@app.post("/attempt/start")
+def attempt_start(body: StartBody) -> dict:
+    if body.consent is not True:
+        raise HTTPException(400, "consent required")
+    if not identity.USER_ID_RE.match(body.user_id or ""):
+        raise HTTPException(400, "invalid user_id")
+    at = STORE.create(body.user_id)
+    return {"attempt_id": at.attempt_id, "server_t0_ms": at.server_t0_ms,
+            "deadline_ms": at.deadline_ms}
+
+
+@app.post("/attempt/{attempt_id}/identity")
+def attempt_identity(attempt_id: str, frame: UploadFile = File(...),
+                     capture_ts_ms: str | None = Form(None)) -> dict:
+    at = _get_attempt(attempt_id)
+    data = _read_frames([frame])
+    try:
+        res = identity.compare(at.user_id, data[0])
+    finally:
+        data.clear()
+    outcome = STORE.record_identity(attempt_id, res)
+    if outcome == "unknown_attempt":
+        raise HTTPException(404, "unknown attempt_id")
+    if outcome == "late":
+        late_result(attempt_id, "identity", res)
+    return {"identity": res["identity"], "similarity": res["similarity"], "ms": res["ms"]}
+
+
+def _first_pass_response(at: Attempt, d, q, p, ident, stage, first_ms) -> dict:
+    return {
+        "decision": d[0], "reason_code": d[1], "message": message_for(d[1], d[2]),
+        "next_action": d[2], "attempt_id": at.attempt_id,
+        "signals": {"quality": _quality_view(q),
+                    "passive": {"status": (p or {}).get("status", "UNAVAILABLE"),
+                                "score": (p or {}).get("score")},
+                    "identity": _identity_view(ident)},
+        "stage_ms": stage, "first_pass_server_ms": first_ms,
+    }
+
+
+@app.post("/attempt/{attempt_id}/liveness")
+def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
+                     capture_ts_ms: list[str] | None = Form(None),
+                     scenario: str | None = Form(None)) -> dict:
+    at = _get_attempt(attempt_id)
+    if at.decision is not None:  # first pass is FINAL
+        return at.decision
+    data = _read_frames(frames)
+    try:
+        ts = _parse_ts(capture_ts_ms, len(data))
+        labels_fut = _labels_future(data[len(data) // 2])
+        q, p, stage = _quality_and_passive(data, ts)
+    finally:
+        data.clear()  # kiosk keeps nothing
+
+    t_wait = time.perf_counter()
+    at.identity_event.wait(timeout=max(at.deadline_mono - time.monotonic(), 0.0))
+    stage["identity_wait"] = int((time.perf_counter() - t_wait) * 1000)
+
+    with at.lock:
+        if at.decision is not None:  # a concurrent request decided first
+            return at.decision
+        t_dec = time.perf_counter()
+        ident = identity_snapshot(at)  # on-time result only
+        d = decide(_decision_signals(q, p, ident))
+        stage["decide"] = int((time.perf_counter() - t_dec) * 1000)
+        first_ms = now_ms() - at.server_t0_ms
+        at.scenario, at.passive, at.quality = scenario, p, _quality_view(q)
+        at.continuity_ok = (q or {}).get("continuity_ok")
+        at.stage_ms = dict(stage)
+        mine = _first_pass_response(at, d, q, p, ident, stage, first_ms)
+        resp = at.set_decision(mine)
+    if resp is mine:  # only the request that actually decided logs it
+        _log(at.attempt_id, at.user_id, scenario, "first_pass", d, q, p, ident, stage,
+             first_ms, first_ms, labels=_labels_result(labels_fut))
+    return resp
+
+
+@app.post("/attempt/{attempt_id}/challenge/start")
+def challenge_start(attempt_id: str) -> dict:
+    at = _get_attempt(attempt_id)
+    with at.lock:
+        if at.decision is None or at.decision["decision"] != "REQUEST_VERIFICATION":
+            raise HTTPException(409, "challenge only after a REQUEST_VERIFICATION first pass")
+        if at.challenge is not None:
+            raise HTTPException(409, "one challenge per attempt")
+        at.challenge = {"challenge_id": str(uuid.uuid4()),
+                        "actions": random.sample(config.CHALLENGE_ACTIONS, 2),
+                        "started_mono": time.monotonic()}
+        ch = at.challenge
+    return {"challenge_id": ch["challenge_id"], "actions": ch["actions"],
+            "baseline_ms": config.CHALLENGE_BASELINE_MS,
+            "timeout_ms": config.CHALLENGE_TIMEOUT_MS}
+
+
+@app.post("/attempt/{attempt_id}/challenge")
+def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
+                     capture_ts_ms: list[str] | None = Form(None),
+                     prompt_ts_ms: str | None = Form(None),
+                     challenge_id: str = Form(...)) -> dict:
+    at = _get_attempt(attempt_id)
+    if at.challenge is None or at.challenge["challenge_id"] != challenge_id:
+        raise HTTPException(409, "no such challenge for this attempt")
+    if at.challenge_decision is not None:
+        return at.challenge_decision
+    elapsed_ms = (time.monotonic() - at.challenge["started_mono"]) * 1000
+    timed_out = elapsed_ms > config.CHALLENGE_TIMEOUT_MS + CHALLENGE_UPLOAD_GRACE_MS
+    data = _read_frames(frames)
+    try:
+        ts = _parse_ts(capture_ts_ms, len(data))
+        prompt_ts = _parse_ts([prompt_ts_ms] if prompt_ts_ms else [], 1)[0]
+        t = time.perf_counter()
+        q = signals.quality(data)
+        t_q = time.perf_counter()
+        ch = signals.challenge_check(data, ts, prompt_ts, at.challenge["actions"])
+        t_c = time.perf_counter()
+    finally:
+        data.clear()
+    challenge = {"status": ch.get("status"), "passive": ch.get("passive"),
+                 "timed_out": timed_out}
+    with at.lock:
+        if at.challenge_decision is not None:
+            return at.challenge_decision
+        ident = identity_snapshot(at)
+        t_dec = time.perf_counter()
+        d = decide(_decision_signals(q, at.passive, ident, challenge))
+        stage = {"quality": int((t_q - t) * 1000), "passive": int((t_c - t_q) * 1000),
+                 "identity_wait": 0, "decide": int((time.perf_counter() - t_dec) * 1000)}
+        first_ms = at.decision["first_pass_server_ms"]
+        total_ms = now_ms() - at.server_t0_ms
+        resp = _first_pass_response(at, d, q, (ch.get("passive") or {}), ident, stage, first_ms)
+        resp["total_ms"] = total_ms
+        mine = resp
+        resp = at.set_challenge_decision(mine)
+    if resp is mine:
+        _log(at.attempt_id, at.user_id, at.scenario, "challenge", d, q, ch.get("passive"),
+             ident, stage, first_ms, total_ms, challenge=challenge)
+    return resp
+
+
+# --- v1: /verify (shape unchanged, routed through decide()) ----------------------
+
+_V1_REASON = {
+    "OK_LIVE_MATCH": "LIVE_MATCH",
+    "SPOOF_PASSIVE": "SCREEN_DETECTED",
+    "ID_MISMATCH": "NO_MATCH",
+    "ID_UNAVAILABLE": "NO_MATCH",
+    "TIMEOUT": "NO_MATCH",
+    "LIVENESS_UNCERTAIN": "NO_MOTION",
+    "LIVENESS_UNAVAILABLE": "NO_MOTION",
+}
+
+
+def _v1_confidence(d, p, sim) -> float:
+    if d[0] == "ALLOW":
+        c = min(sim / 100 if sim is not None else 0.0, (p or {}).get("score") or 0.0)
+    elif d[1] == "SPOOF_PASSIVE":
+        c = (p or {}).get("score") or 0.5
+    elif d[1] == "ID_MISMATCH":
+        c = 1 - (sim or 0.0) / 100
+    else:
+        c = 0.5
+    return round(min(max(float(c), 0.0), 1.0), 4)
 
 
 @app.post("/verify")
 def verify(frames: list[UploadFile] = File(...), user_id: str = Form(...)) -> dict:
     # Sync endpoint: FastAPI runs it in a worker thread, so the blocking
     # Rekognition calls don't stall the event loop.
-    if not 1 <= len(frames) <= MAX_FRAMES:
-        raise HTTPException(400, f"send 1-{MAX_FRAMES} frames")
-    data = [f.file.read() for f in frames]
-    if any(not b or len(b) > MAX_FRAME_BYTES for b in data):
-        raise HTTPException(400, "each frame must be a non-empty image under 5 MB")
+    t0 = time.perf_counter()
+    data = _read_frames(frames)
+    attempt_id = str(uuid.uuid4())
     try:
-        return run_verify(data, user_id)
+        mid = data[len(data) // 2]
+        id_fut = _EXECUTOR.submit(identity.compare, user_id, mid)
+        labels_fut = _labels_future(mid)
+        q, p, stage = _quality_and_passive(data, [0] * len(data))
+        t_wait = time.perf_counter()
+        remaining = config.ATTEMPT_DEADLINE_MS / 1000 - (t_wait - t0)
+        wait([id_fut], timeout=max(remaining, 0.0))
+        stage["identity_wait"] = int((time.perf_counter() - t_wait) * 1000)
+        ident = id_fut.result(timeout=0) if id_fut.done() else None  # late -> missing
     finally:
         data.clear()  # kiosk keeps nothing
+    t_dec = time.perf_counter()
+    d = decide(_decision_signals(q, p, ident))
+    stage["decide"] = int((time.perf_counter() - t_dec) * 1000)
+    decision_ms = int((time.perf_counter() - t0) * 1000)
+    sim = (ident or {}).get("similarity")
+    q_ok = [f for f in (q or {}).get("per_frame", []) if isinstance(f, dict)]
+    labels = _labels_result(labels_fut)
+    _log(attempt_id, user_id, "verify_v1", "first_pass", d, q, p, ident, stage,
+         decision_ms, decision_ms, labels=labels)
+    return {
+        "decision": d[0],
+        "confidence": _v1_confidence(d, p, sim),
+        "decision_ms": decision_ms,
+        "reason_code": _V1_REASON.get(d[1], "LOW_QUALITY"),
+        "signals": {
+            "labels": [l["name"] for l in labels or []],
+            "motion": 0.0,
+            "quality": round(sum(1 for f in q_ok if f.get("ok")) / len(q_ok), 4) if q_ok else 0.0,
+            "similarity": round(float(sim or 0.0), 2),
+        },
+    }
