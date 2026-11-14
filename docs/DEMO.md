@@ -27,6 +27,8 @@
 
 ## Judge Q&A
 
+Use the tester-reported challenge counts in the pitch. Genuine passed 5/5. Phone photos passed 0/3, with all three UNCERTAIN. Replays passed 0/3, with all three UNCERTAIN. Prints and both masks are untested because the props were unavailable. The final kiosk access decisions and trial IDs still need the source log.
+
 - **What would OTP tell you?** “OTP proves you hold a phone, not that you're present.” A phone check cannot substitute for face liveness or identity evidence at the kiosk.
 - **Is a score of 0.96 a 96% chance?** No. Scores are model signals. We set decision thresholds with Session A and evaluate them on fresh Session B attempts.
 - **How much can we infer from this test?** Read the numerator and denominator. The attempts are from a small consenting team, with repeated participants on one setup. A zero in the false accepts column describes the observed attempts only.
