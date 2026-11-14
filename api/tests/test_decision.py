@@ -78,6 +78,10 @@ def _identity(c, aid):
     return c.post(f"/attempt/{aid}/identity", files={"frame": ("f.jpg", FRAME, "image/jpeg")})
 
 
+def _status_of(sig):
+    return sig.get("status") if isinstance(sig, dict) else None
+
+
 def test_a_missing_unknown_or_unavailable_signal_never_allows():
     qualities = [GOOD_Q, None, {"ok": None, "continuity_ok": None},
                  {"ok": False, "fail_reason": "BLUR", "continuity_ok": True},
@@ -99,19 +103,27 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
                     "quick_challenge": qc, "passive_allow_enabled": flag,
                     "schedule": sc, "mode": md})
         # 2 s first pass: ALLOW only with on-time MATCH + quick 1-action PASS +
-        # good continuous quality + PERMITTED + ONLINE. Passive never matters
-        # (SPOOF included), and PASSIVE_ALLOW_ENABLED has no effect.
+        # good continuous quality + PERMITTED + ONLINE + passive not SPOOF.
+        # Passive LIVE is never needed and PASSIVE_ALLOW_ENABLED has no effect.
         all_good = (q is GOOD_Q and i is MATCH and qc is not None and qc["status"] == "PASS"
-                    and sc is PERMITTED and md == "ONLINE")
+                    and sc is PERMITTED and md == "ONLINE"
+                    and not (p and p.get("status") == "SPOOF"))  # passive downgrade
         assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, sc, md, qc, d)
         assert d[0] != "DENY", d  # nothing in these lists is a hard negative
-        if md == "ONLINE" and not (qc and qc["status"] == "PASS"):
-            assert d[2] == "CHALLENGE", d  # quick FAIL/UNCERTAIN/missing -> 2-action step-up
+        if md == "ONLINE" and (not (qc and qc["status"] == "PASS")
+                               or (p and p.get("status") == "SPOOF")):
+            assert d[2] == "CHALLENGE", d  # quick FAIL/UNCERTAIN/missing or SPOOF -> step-up
         combos += 1
     assert combos == 6 * 6 * 4 * 3 * 4 * 3 * 5
 
-    # Challenge phase: ALLOW only with challenge PASS (+ MATCH, PERMITTED, ONLINE).
-    # The challenge-frame passive status does not matter either way.
+    # Passive downgrade (1): perfect quick path + passive SPOOF -> step-up, never DENY.
+    assert decide({"quality": GOOD_Q, "passive": {"status": "SPOOF", "score": 0.05},
+                   "identity": MATCH, "challenge": None, "quick_challenge": {"status": "PASS"},
+                   "passive_allow_enabled": False, **OK}) == \
+        ("REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE")
+
+    # Challenge phase: ALLOW only with challenge PASS (+ MATCH, PERMITTED, ONLINE)
+    # and no passive SPOOF on the challenge frames (passive LIVE is not needed).
     for ch_status, ch_passive, sc, md in itertools.product(
             ["PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE", None],
             [LIVE, None, {"status": "UNAVAILABLE"}, {"status": "SPOOF"}],
@@ -121,10 +133,18 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
                     "challenge": {"status": ch_status, "passive": ch_passive, "timed_out": False,
                                   "identity": MATCH},
                     "passive_allow_enabled": True, "schedule": sc, "mode": md})
-        assert (d[0] == "ALLOW") == (ch_status == "PASS" and sc is PERMITTED
-                                      and md == "ONLINE"), d
+        assert (d[0] == "ALLOW") == (ch_status == "PASS" and sc is PERMITTED and md == "ONLINE"
+                                      and _status_of(ch_passive) != "SPOOF"), d
+        assert d[0] != "DENY", d  # passive never DENYs (flag off)
         if md == "ONLINE" and ch_status in ("FAIL", "UNCERTAIN"):
             assert d[2] == "RECEPTION", d
+
+    # Passive downgrade (2): step-up PASS + SPOOF on challenge frames -> RECEPTION.
+    assert decide({"quality": GOOD_Q, "passive": LIVE, "identity": MATCH, **OK,
+                   "passive_allow_enabled": False,
+                   "challenge": {"status": "PASS", "passive": {"status": "SPOOF"},
+                                 "timed_out": False, "identity": MATCH}}) == \
+        ("REQUEST_VERIFICATION", "MANUAL_REVIEW", "RECEPTION")
 
     # Challenge phase uses the challenge-frame identity, not the first-pass one
     # (which may have been late/missing): MATCH -> ALLOW, UNKNOWN/missing ->

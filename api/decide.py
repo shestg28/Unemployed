@@ -35,6 +35,12 @@ Anything else in the first pass -> REQUEST_VERIFICATION + CHALLENGE (the
 2-action step-up; may exceed 2 s, logged as total_ms). Step-up ALLOW =
 challenge PASS + challenge-frame MATCH + good quality + PERMITTED; step-up
 FAIL, UNCERTAIN or anything else -> RECEPTION. Passive is never required.
+
+Passive DOWNGRADE (Anil's live data: passive flagged 5/6 attacks SPOOF, 5/5
+genuine LIVE; a replayed smile passed the 1-action check twice): passive SPOOF
+blocks an ALLOW but never causes DENY (unless PASSIVE_DENY_ENABLED):
+  quick path + passive SPOOF            -> REQUEST_VERIFICATION + CHALLENGE
+  step-up PASS + SPOOF on challenge frames -> RECEPTION
 APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
 """
 from typing import Any
@@ -113,6 +119,8 @@ def _first_pass(signals: dict) -> Decision:
 
     if (quick == "PASS" and _status(ident) == "MATCH"
             and _quality_ok(q) and _continuity_ok(q)):
+        if passive == "SPOOF":  # downgrade: step-up, never DENY
+            return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"
         return ALLOW, "OK_LIVE_MATCH", "NONE"  # schedule/mode still checked by decide()
 
     problem = _quality_problem(q)
@@ -143,7 +151,9 @@ def _after_challenge(signals: dict) -> Decision:
         return REQUEST, "ID_UNAVAILABLE", "RECEPTION"
     if not (_quality_ok(q) and _continuity_ok(q)):
         return REQUEST, "MANUAL_REVIEW", "RECEPTION"
-    # Passive score is NOT required here (gate: it misses genuine faces).
+    if _status(ch.get("passive")) == "SPOOF":  # downgrade: reception, never DENY
+        return REQUEST, "MANUAL_REVIEW", "RECEPTION"
+    # Passive LIVE is NOT required (it can miss genuine faces); only SPOOF blocks.
     return ALLOW, "OK_LIVE_MATCH", "NONE"
 
 
