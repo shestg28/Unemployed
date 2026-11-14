@@ -22,9 +22,8 @@ LIMIT_MS = 2000
 COLUMNS = ("scope", "metric", "value", "unit", "n", "numerator")
 
 
-def read_attempts(path, session, untagged_session):
+def read_attempts(path, session):
     grouped = {}
-    seen_sessions = set()
     skipped = Counter()
     with path.open(encoding="utf-8-sig") as source:
         for line_number, line in enumerate(source, 1):
@@ -33,19 +32,18 @@ def read_attempts(path, session, untagged_session):
             record = json.loads(line)
             if not isinstance(record, dict):
                 raise ValueError(f"line {line_number}: expected a JSON object")
-            tag = record.get("session")
-            if tag is not None and tag not in SESSIONS:
-                raise ValueError(f"line {line_number}: invalid session tag")
-            if tag is None and untagged_session is None:
-                skipped["untagged rows"] += 1
+            scenario_tag = record.get("scenario")
+            if not isinstance(scenario_tag, str) or "/" not in scenario_tag:
+                skipped["rows without a session-prefixed scenario"] += 1
                 continue
-            tag = tag if tag is not None else untagged_session
-            seen_sessions.add(tag)
+            tag, scenario = scenario_tag.split("/", 1)
+            if tag not in SESSIONS:
+                skipped["rows with an unknown session prefix"] += 1
+                continue
             if tag != session:
                 continue
-            scenario = record.get("scenario")
             if scenario not in SCENARIOS:
-                skipped["rows with missing or unknown scenario"] += 1
+                skipped["rows with an unknown scenario"] += 1
                 continue
             if record.get("stubs"):
                 raise ValueError(f"line {line_number}: selected session used a stub")
@@ -62,9 +60,6 @@ def read_attempts(path, session, untagged_session):
             if scenario != attempt["scenario"] or phase in attempt:
                 raise ValueError(f"line {line_number}: conflicting or duplicate decision")
             attempt[phase] = {"decision": decision, "record": record}
-
-    if untagged_session and seen_sessions - {untagged_session}:
-        raise ValueError("--untagged-session requires a log dedicated to that session")
 
     attempts = []
     for attempt_id, attempt in grouped.items():
@@ -183,15 +178,11 @@ def markdown(session, attempts, rows, skipped):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", choices=SESSIONS, required=True)
-    parser.add_argument("--untagged-session", choices=SESSIONS,
-                        help="Explicit session of an isolated, single-session source log")
     parser.add_argument("--log", type=Path, default=ROOT / "logs" / "attempts.jsonl")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "eval")
     args = parser.parse_args()
-    if args.untagged_session and args.untagged_session != args.session:
-        parser.error("--untagged-session must match --session")
     try:
-        attempts, skipped = read_attempts(args.log, args.session, args.untagged_session)
+        attempts, skipped = read_attempts(args.log, args.session)
         rows = summaries(attempts)
         args.out_dir.mkdir(parents=True, exist_ok=True)
         basename = f"results-{args.session}"

@@ -18,7 +18,7 @@
 | Bad light | 6 | — | — | — | — |
 | **Total** | **48** | — | — | — | — |
 
-Generate the measured counts, rates, and times with `python eval/results.py --session B --log PATH`. If the source log has no session field, use a clean B-only export and add `--untagged-session B`. The 30-frame calibration run is separate.
+Generate the measured counts, rates, and times with `python eval/results.py --session B --log PATH`. The reporter reads session prefixes from the scenario field, such as `B/print`, and skips rows without a slash. The 30-frame calibration run is separate.
 
 ## Schedule and offline outcomes
 

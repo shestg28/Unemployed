@@ -17,16 +17,15 @@ Use only consenting teammates as presenters and as the subjects of test props. E
 1. In **Session A**, use fresh attempt IDs and calibrate the thresholds. Record the code revision, configuration, camera, and test conditions. Freeze them before Session B.
 2. In **Session B**, collect fresh trials with the frozen configuration. Interleave scenario order and rotate consenting teammates across trials where possible. Keep ordinary lighting and camera position consistent except in the intended lighting test. Keep the first valid outcome even when it is unexpected. Record any acquisition or logging failure and actual counts. A setup rehearsal belongs outside A and B. If settings change after B begins, preserve that run and start a fresh reporting run.
 3. Start at the ID tap and record the first visible decision time for the live demo. The report uses server timings from attempt start. Label them as server timings and keep the kiosk timer separate unless the clocks are confirmed equivalent. For a challenge, keep the scenario, session and attempt ID from the original presentation. If the subject or presentation changes, start a new attempt. Measure the corrected-light retry separately from the low-light presentation.
-4. Tag each decision row with `session: "A"` or `session: "B"`. The current logger on `akash/api-v2` records the scenario and phase but lacks a session field. Until the integration adds it, use a fresh log for each session and pass the known session explicitly, as below. Never infer the session of a mixed or previously used log.
+4. Prefix each decision row's `scenario` with the session and a slash, for example `A/print` or `B/print`. Use the same tag on the first pass and follow-up for each attempt. The reporter skips rows without a slash and never infers a session.
 
 Run from the repo root with Python 3.10+:
 
 ```text
 python eval/results.py --session B
-python eval/results.py --session B --untagged-session B
 ```
 
-The second command is for a physically separate, clean B-only log. The default input is `logs/attempts.jsonl`. Outputs are `eval/results-B.md` and `eval/results-B.csv`. Add `--log PATH` for a session-specific snapshot.
+The default input is `logs/attempts.jsonl`. Outputs are `eval/results-B.md` and `eval/results-B.csv`. Add `--log PATH` to read a different log.
 
 Counts use the last decision per attempt. Any ALLOW counts as entry for the security metrics. Attack scenarios are print, phone, replay and both mask variants. An attack with no ALLOW counts toward the requested attack detection rate (access prevented). Report the DENY-only rate independently. A REQUEST by itself establishes only that access was held. False accepts count attack and impostor attempts with any ALLOW. False rejects and step-ups use the first decision on normal-light genuine attempts, with final genuine DENY and REQUEST reported separately. Bad light has its own row. State every denominator and report median, nearest-rank p95, and mean first-pass time. Report total-time median and p95 separately. A REQUEST without a recorded follow-up has no measured total duration.
 

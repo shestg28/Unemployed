@@ -33,3 +33,16 @@
 - **Is REQUEST a detected spoof?** REQUEST holds the door closed while more evidence is needed. The DENY-only rate tells you how often attack attempts received a DENY without any ALLOW.
 - **Where is the two-second clock measured?** The results table reports server first-pass time from attempt start. The live timer shows the person’s experience. A requested follow-up has a separate end-to-end time.
 - **What happens to the face images?** State the verified retention for attempt frames and the separate policy for enrollment references. The contract allows server-side enrollment photos. Only say “no images stored” if the deployed build supports that claim across the stated scope. Bedrock explanation, if enabled, receives no face images and runs after the decision.
+
+## Mentor questions
+
+1. Does the two-second clock start when the participant presents their face or when capture finishes?
+2. Can the step-up challenge take longer than two seconds? Does that also apply when every online biometric approval requires the challenge?
+3. While offline, does staff verification using a physical ID check qualify as fallback verification?
+4. Can we photograph the performance evaluation slide? Record the exact metric names, targets, units and denominators before renaming the results columns.
+
+## Props and timed rehearsal
+
+Place the props in demo order. Put the three prints first, then a phone with the face photo and both replay clips ready, then the mask without cutouts and the cutout mask. Use only approved props and consenting teammates. Keep the offline staff badge ready at the laptop.
+
+Start the stopwatch on the opening line, speak the script out loud, and record the split at each slide change. Stop after the privacy line. Use a recorded sequence for the reconnect and restart checks if the live sequence would exceed 3:00. Record elapsed time and any actions skipped. Rehearsals and Anil's live challenge calibration stay outside Session B.
