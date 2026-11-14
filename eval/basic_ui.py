@@ -20,35 +20,68 @@ def main():
     from PIL import Image, ImageTk
 
     root = tk.Tk()
-    root.title('HID | Liveness demo')
-    root.geometry('900x760')
-    root.configure(bg='#f3f6fb')
-    root.minsize(760, 680)
-    ttk.Style().configure('TButton', font=('Segoe UI', 13), padding=10)
-    tk.Label(root, text='HID  /  Liveness check', font=('Segoe UI', 25, 'bold'),
-             bg='#f3f6fb', fg='#102442').pack(pady=(18, 5))
-    tk.Label(root, text='Experimental demo • consenting teammates only • no images saved',
-             bg='#f3f6fb', fg='#526078', font=('Segoe UI', 11)).pack()
-    preview = tk.Label(root, bg='#102442', text='Preparing camera and models…', fg='white')
-    preview.pack(pady=12)
-    status = tk.StringVar(value='Loading models…')
-    status_label = tk.Label(root, textvariable=status, font=('Segoe UI', 22, 'bold'),
-                            bg='#f3f6fb', fg='#102442')
-    status_label.pack()
-    detail = tk.StringVar(value='The check starts when one face is detected.')
-    tk.Label(root, textvariable=detail, font=('Segoe UI', 11), bg='#f3f6fb').pack(pady=5)
-    scores_text = tk.StringVar(value='Six sampled scores will appear here')
-    tk.Label(root, textvariable=scores_text, font=('Consolas', 12), bg='#f3f6fb').pack(pady=5)
+    root.title('HID | Liveness studio')
+    root.geometry('1080x670')
+    root.minsize(1040, 640)
+    bg, panel, muted = '#0b1224', '#16223b', '#a4b4cf'
+    root.configure(bg=bg)
+    style = ttk.Style()
+    style.theme_use('clam')
+    style.configure('Accent.TButton', font=('Segoe UI', 13, 'bold'), padding=14,
+                    background='#6366f1', foreground='white', borderwidth=0)
+    style.map('Accent.TButton', background=[('active','#818cf8'),('disabled','#344260')])
+    style.configure('Live.Horizontal.TProgressbar', troughcolor='#263550', background='#22d3ee', borderwidth=0)
+    head = tk.Frame(root, bg=bg)
+    head.pack(fill='x', padx=24, pady=(20,16))
+    tk.Label(head, text='HID  /  Liveness studio', font=('Segoe UI',25,'bold'), bg=bg, fg='white').pack(side='left')
+    tk.Label(head, text='  LOCAL DEMO  ', font=('Segoe UI',10,'bold'), bg='#29376b', fg='#c7d2fe', pady=8).pack(side='right')
+    body = tk.Frame(root, bg=bg)
+    body.pack(fill='both', expand=True, padx=24)
+    left = tk.Frame(body, bg=panel, padx=12, pady=12)
+    left.pack(side='left', fill='both')
+    tk.Label(left, text='CAMERA PREVIEW', bg=panel, fg='#67e8f9', font=('Segoe UI',10,'bold')).pack(anchor='w', pady=(0,10))
+    preview = tk.Label(left, bg='#080e1c', text='Preparing camera and models…', fg='white')
+    preview.pack()
+    tk.Label(left, text='Face the camera • Keep one face in view', bg=panel, fg='white', font=('Segoe UI',12)).pack(pady=(14,4))
+    tk.Label(left, text='Consenting teammates only. Images stay in memory.', bg=panel, fg=muted, font=('Segoe UI',10)).pack()
+    right = tk.Frame(body, bg=panel, padx=16, pady=16)
+    right.pack(side='right', fill='both', expand=True, padx=(16,0))
+    tk.Label(right, text='YOUR CHECK', bg=panel, fg='#a5b4fc', font=('Segoe UI',10,'bold')).pack(anchor='w')
+    status = tk.StringVar(value='Getting ready…')
+    status_label = tk.Label(right, textvariable=status, wraplength=280, justify='left', anchor='w',
+                            font=('Segoe UI',21,'bold'), bg=panel, fg='white')
+    status_label.pack(fill='x', pady=(10,8))
+    progress = ttk.Progressbar(right, maximum=2, style='Live.Horizontal.TProgressbar')
+    progress.pack(fill='x', pady=8)
+    detail = tk.StringVar(value='The timer starts when one face is detected.')
+    tk.Label(right, textvariable=detail, wraplength=280, justify='left', font=('Segoe UI',10), bg=panel, fg=muted).pack(fill='x', pady=8)
+    tk.Label(right, text='SIX SAMPLED SCORES', bg=panel, fg='#a5b4fc', font=('Segoe UI',9,'bold')).pack(anchor='w', pady=(8,6))
+    score_grid = tk.Frame(right, bg=panel)
+    score_grid.pack(fill='x')
+    cards = []
+    for i in range(6):
+        card = tk.Label(score_grid, text=f'{i+1}  —', font=('Consolas',12,'bold'), bg='#24324c', fg=muted, padx=8, pady=9)
+        card.grid(row=i//2, column=i%2, padx=3, pady=3, sticky='ew')
+        cards.append(card)
+    score_grid.columnconfigure((0,1), weight=1)
+    scores_text = tk.StringVar(value='Scores are not probabilities')
+    tk.Label(right, textvariable=scores_text, wraplength=280, bg=panel, fg=muted, font=('Segoe UI',9)).pack(pady=6)
     events = queue.Queue()
     latest = queue.Queue(maxsize=1)
     start = threading.Event()
     stop = threading.Event()
-    button = ttk.Button(root, text='Run check', state='disabled', command=start.set)
-    button.pack(pady=8)
-    tk.Label(root, text='4 of 6 > 0.85: approve  |  4 of 6 < 0.75: reject  |  otherwise: request verification',
-             bg='#f3f6fb', fg='#526078', font=('Segoe UI', 10)).pack()
-    tk.Label(root, text='Scores are not probabilities. Demo approval does not authorize access.',
-             bg='#f3f6fb', fg='#526078', font=('Segoe UI', 10)).pack(pady=4)
+    def run_check():
+        if str(button['state']) != 'disabled':
+            button.configure(state='disabled')
+            start.set()
+    button = ttk.Button(right, text='▶  Run check', style='Accent.TButton', state='disabled', command=run_check)
+    button.pack(fill='x', pady=(6,0))
+    root.bind('<space>', lambda event: run_check())
+    tk.Label(right, text='Press Space to run again', bg=panel, fg=muted, font=('Segoe UI',9)).pack(pady=5)
+    tk.Label(root, text='4/6 above 0.85: approve   •   4/6 below 0.75: reject   •   Otherwise: request verification',
+             bg=bg, fg=muted, font=('Segoe UI',10)).pack(pady=(14,4))
+    tk.Label(root, text='EXPERIMENTAL  /  Demo approval does not authorize access. Actual timing is shown after each check.',
+             bg=bg, fg='#8292b1', font=('Segoe UI',9)).pack(pady=(0,12))
 
     def worker():
         cap = None
@@ -121,21 +154,31 @@ def main():
             elif kind == 'running':
                 button.configure(state='disabled')
                 status.set('Looking for one face…')
-                status_label.configure(fg='#102442')
+                status_label.configure(fg='#67e8f9')
+                progress['value'] = 0
+                for i, card in enumerate(cards):
+                    card.configure(text=f'{i+1}  —', bg='#24324c', fg=muted)
                 scores_text.set('Collecting fresh frames…')
             elif kind == 'progress':
                 elapsed, count = value
                 if elapsed is not None:
                     status.set(f'Checking… {max(0, 2-elapsed):.1f}s')
+                    progress['value'] = min(elapsed, 2)
                 detail.set(f'{count} valid scores collected')
             elif kind == 'result':
                 outcome, sampled, high, elapsed, count = value
                 status.set(outcome)
-                status_label.configure(fg={'APPROVED':'#087947','REJECTED':'#bd3030'}.get(outcome,'#986000'))
+                status_label.configure(fg={'APPROVED':'#34d399','REJECTED':'#fb7185'}.get(outcome,'#fbbf24'))
                 timing = f'{elapsed:.3f}s measured' if elapsed is not None else 'No single face detected'
                 detail.set(f'{timing} • {high}/{len(sampled)} above 0.85 • {count} scores available')
-                scores_text.set('   '.join(f'{s:.4f}' for s in sampled) or 'Not enough valid frames')
-                button.configure(state='normal', text='Run again')
+                progress['value'] = 2
+                for i, card in enumerate(cards):
+                    if i < len(sampled):
+                        value = sampled[i]
+                        color = '#34d399' if value > .85 else '#fb7185' if value < .75 else '#fbbf24'
+                        card.configure(text=f'{i+1}  {value:.4f}', fg=color)
+                scores_text.set('Scores are not probabilities' if sampled else 'Not enough valid frames')
+                button.configure(state='normal', text='↻  Run again')
             elif kind == 'error':
                 status.set('Unable to run check')
                 detail.set(value)
