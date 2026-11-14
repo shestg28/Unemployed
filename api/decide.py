@@ -40,6 +40,9 @@ Passive DOWNGRADE (Anil's live data: passive flagged 5/6 attacks SPOOF, 5/5
 genuine LIVE; a replayed smile passed the 1-action check twice): passive SPOOF
 blocks an ALLOW but never causes DENY (unless PASSIVE_DENY_ENABLED):
   quick path + passive SPOOF            -> REQUEST_VERIFICATION + CHALLENGE
+  quick path + passive not LIVE (UNCERTAIN/UNAVAILABLE/missing), while
+    quick_requires_passive_live (default True, QUICK_REQUIRES_PASSIVE_LIVE=1)
+                                        -> REQUEST_VERIFICATION + CHALLENGE
   step-up PASS + SPOOF on challenge frames -> RECEPTION
 APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
 """
@@ -120,6 +123,9 @@ def _first_pass(signals: dict) -> Decision:
     if (quick == "PASS" and _status(ident) == "MATCH"
             and _quality_ok(q) and _continuity_ok(q)):
         if passive == "SPOOF":  # downgrade: step-up, never DENY
+            return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"
+        # Missing flag = True (safe default): quick ALLOW needs passive LIVE.
+        if signals.get("quick_requires_passive_live") is not False and passive != "LIVE":
             return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"
         return ALLOW, "OK_LIVE_MATCH", "NONE"  # schedule/mode still checked by decide()
 
