@@ -27,11 +27,16 @@ def _num(name: str, default: float) -> float:
 
 
 # --- Attempt lifecycle -------------------------------------------------------
-ATTEMPT_DEADLINE_MS = int(_num("ATTEMPT_DEADLINE_MS", 1700))  # t0 + this
+ATTEMPT_DEADLINE_MS = int(_num("ATTEMPT_DEADLINE_MS", 1800))  # t0 + this (2 s redesign)
 ATTEMPT_TTL_S = _num("ATTEMPT_TTL_S", 120)                     # evict after
 CHALLENGE_TIMEOUT_MS = 5000
 CHALLENGE_BASELINE_MS = 400
 CHALLENGE_ACTIONS = ("SMILE", "OPEN_MOUTH", "TURN_LEFT", "TURN_RIGHT")
+# 2 s redesign: one quick action shown at the tap, checked inside the first pass.
+QUICK_ACTIONS = ("SMILE", "OPEN_MOUTH")
+# Step-up: exactly ONE pose + ONE expression, random order.
+POSE_ACTIONS = ("TURN_LEFT", "TURN_RIGHT")
+EXPRESSION_ACTIONS = ("SMILE", "OPEN_MOUTH")
 
 # --- Decision gates ------------------------------------------------------------
 # Passive-only ALLOW is off unless explicitly enabled. Off -> a clean first
@@ -48,7 +53,7 @@ ID_MATCH = _num("ID_MATCH", 90)       # >= -> MATCH
 ID_MISMATCH = _num("ID_MISMATCH", 50)  # < (face found, adequate quality) -> MISMATCH
 
 # --- Request limits ------------------------------------------------------------
-MAX_FRAMES = 10
+MAX_FRAMES = 16  # ~14 frames at ~10 fps over ~1.4 s
 MAX_FRAME_BYTES = 5 * 1024 * 1024  # Rekognition's image-bytes limit
 
 # --- Logging -------------------------------------------------------------------

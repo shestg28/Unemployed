@@ -48,6 +48,17 @@ def fit(img: bytes, max_side: int = MAX_SIDE) -> bytes:
 _ENROLLED: dict[str, bytes] = {}
 _enrolled_lock = threading.Lock()
 _loaded = False
+# Outcome of the most recent CompareFaces call (warm-up included): for /status.
+_last_call_ok: bool | None = None
+
+
+def service_ok() -> bool:
+    return _last_call_ok is True
+
+
+def _record(ok: bool) -> None:
+    global _last_call_ok
+    _last_call_ok = ok
 
 
 def load_enrolled() -> int:
@@ -95,8 +106,10 @@ def warm_up() -> dict:
         get_client().compare_faces(SourceImage={"Bytes": ref}, TargetImage={"Bytes": ref},
                                    SimilarityThreshold=0)
         note, ok = f"ok:{uid}", True
+        _record(True)
     except Exception as e:
         note, ok = f"error:{type(e).__name__}", False
+        _record(False)
     ms = int((time.perf_counter() - t0) * 1000)
     # uvicorn.error is the logger uvicorn actually prints at INFO.
     startup_log = logging.getLogger("uvicorn.error")
@@ -152,7 +165,9 @@ def compare(user_id: str, frame: bytes) -> dict:
             TargetImage={"Bytes": fit(frame)},
             SimilarityThreshold=0,  # get the raw score; thresholds applied here
         )
+        _record(True)
         return out(*classify(resp))
     except Exception as e:  # no creds, timeout, no face in source, throttling...
+        _record(False)
         log.warning("compare_faces failed: %s", type(e).__name__)
         return out("UNKNOWN", None, f"error:{type(e).__name__}")

@@ -26,6 +26,7 @@ class Attempt:
     t0_mono: float
     deadline_mono: float
     scenario: str | None = None
+    first_action: str | None = None     # quick 1-action challenge shown at the tap
     identity: dict | None = None        # accepted before deadline/decision
     identity_late: list = field(default_factory=list)  # logged, never used
     passive: dict | None = None

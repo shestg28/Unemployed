@@ -119,6 +119,22 @@ def policy_version() -> str | None:
     return data.get("policy_version") if data else None
 
 
+def policy_state(at: datetime | None = None) -> dict:
+    """-> {"status": current|expired|missing, "version", "expires_utc"} (top-level expiry)."""
+    data = _load()
+    if data is None:
+        return {"status": "missing", "version": None, "expires_utc": None}
+    version, raw = data.get("policy_version"), data.get("expires_utc")
+    try:
+        exp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+    except Exception:
+        return {"status": "expired", "version": version, "expires_utc": raw}
+    status = "current" if (at or now()) < exp else "expired"
+    return {"status": status, "version": version, "expires_utc": raw}
+
+
 def _parse_hhmm(s) -> dtime:
     h, m = str(s).split(":")
     return dtime(int(h), int(m))

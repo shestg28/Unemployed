@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
     identity.load_enrolled()   # reference bytes, once
     identity.init_client()     # shared boto3 client, once (keep-alive pool)
     identity.warm_up()         # throwaway CompareFaces: pay TLS setup now
+    await asyncio.to_thread(signals.warm_up)  # load passive + landmarker models now
     stubs = signals.stubs_in_use()
     if stubs:
         log.warning("STUB pipeline functions in use (never ALLOW): %s", stubs)
@@ -138,7 +139,7 @@ def _identity_view(ident: dict | None) -> dict:
             "similarity": ident.get("similarity"), "note": ident.get("note")}
 
 
-def _decision_signals(q, p, ident, challenge=None, *, user_id: str) -> dict:
+def _decision_signals(q, p, ident, challenge=None, *, user_id: str, quick=None) -> dict:
     """Schedule and mode are evaluated NOW, at the moment of the decision."""
     return {
         "schedule": schedule.evaluate(user_id, config.KIOSK_ZONE),
@@ -148,6 +149,7 @@ def _decision_signals(q, p, ident, challenge=None, *, user_id: str) -> dict:
         "identity": None if ident is None else
                     {"status": ident.get("identity"), "similarity": ident.get("similarity")},
         "challenge": challenge,
+        "quick_challenge": quick,
         "passive_allow_enabled": config.PASSIVE_ALLOW_ENABLED,
         "passive_deny_enabled": config.PASSIVE_DENY_ENABLED,
     }
@@ -174,6 +176,7 @@ def _log(at_id, user_id, scenario, phase, d, q, p, ident, stage, first_ms, total
             "identity_status": _identity_view(ident)["status"],
             "identity_similarity": _identity_view(ident)["similarity"],
             "challenge_status": (challenge or {}).get("status"),
+            "quick_challenge": sig.get("quick_challenge"),
             "labels": labels,
         },
         "stubs": signals.stubs_in_use(),
@@ -195,8 +198,9 @@ def attempt_start(body: StartBody) -> dict:
     if not identity.USER_ID_RE.match(body.user_id or ""):
         raise HTTPException(400, "invalid user_id")
     at = STORE.create(body.user_id)
+    at.first_action = random.choice(config.QUICK_ACTIONS)
     return {"attempt_id": at.attempt_id, "server_t0_ms": at.server_t0_ms,
-            "deadline_ms": at.deadline_ms}
+            "deadline_ms": at.deadline_ms, "action": at.first_action}
 
 
 @app.post("/attempt/{attempt_id}/identity")
@@ -218,7 +222,8 @@ def attempt_identity(attempt_id: str, frame: UploadFile = File(...),
 
 
 def _first_pass_response(at: Attempt, d, q, p, ident, stage, first_ms, sig) -> dict:
-    return {
+    quick = sig.get("quick_challenge")
+    resp = {
         "decision": d[0], "reason_code": d[1], "message": message_for(d[1], d[2]),
         "next_action": d[2], "attempt_id": at.attempt_id,
         "schedule": _schedule_view(sig), "mode": sig["mode"],
@@ -228,11 +233,15 @@ def _first_pass_response(at: Attempt, d, q, p, ident, stage, first_ms, sig) -> d
                     "identity": _identity_view(ident)},
         "stage_ms": stage, "first_pass_server_ms": first_ms,
     }
+    if quick is not None:
+        resp["signals"]["challenge"] = quick
+    return resp
 
 
 @app.post("/attempt/{attempt_id}/liveness")
 def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
                      capture_ts_ms: list[str] | None = Form(None),
+                     prompt_ts_ms: str | None = Form(None),
                      scenario: str | None = Form(None)) -> dict:
     at = _get_attempt(attempt_id)
     if at.decision is not None:  # first pass is FINAL
@@ -241,7 +250,24 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
     try:
         ts = _parse_ts(capture_ts_ms, len(data))
         labels_fut = _labels_future(data[len(data) // 2])
-        q, p, stage = _quality_and_passive(data, ts)
+        quick = None
+        if prompt_ts_ms and at.first_action and mode.current() == "ONLINE":
+            # 2 s redesign: quality + the ONE quick action in parallel. The
+            # challenge's own passive run is the (log-only) passive signal.
+            prompt_ts = _parse_ts([prompt_ts_ms], 1)[0]
+            t = time.perf_counter()
+            q_fut = _EXECUTOR.submit(signals.quality, data)
+            ch = signals.challenge_check(data, ts, prompt_ts, [at.first_action])
+            t_c = time.perf_counter()
+            q = q_fut.result()
+            p = ch.get("passive") or {"status": "UNAVAILABLE", "score": None}
+            quick = {"action": at.first_action, "status": ch.get("status"),
+                     "reason": ch.get("reason")}
+            stage = {"quality": int((time.perf_counter() - t) * 1000),
+                     "passive": (p or {}).get("ms", 0) or 0,
+                     "challenge": int((t_c - t) * 1000)}
+        else:  # no prompt sent, or offline (offline: staff verify, no challenge)
+            q, p, stage = _quality_and_passive(data, ts)
     finally:
         data.clear()  # kiosk keeps nothing
 
@@ -255,7 +281,7 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
             return at.decision
         t_dec = time.perf_counter()
         ident = identity_snapshot(at)  # on-time result only
-        sig = _decision_signals(q, p, ident, user_id=at.user_id)
+        sig = _decision_signals(q, p, ident, user_id=at.user_id, quick=quick)
         d = decide(sig)
         stage["decide"] = int((time.perf_counter() - t_dec) * 1000)
         first_ms = now_ms() - at.server_t0_ms
@@ -271,6 +297,13 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
     return resp
 
 
+def _stepup_actions() -> list[str]:
+    """Exactly one pose + one expression, in random order (never two of a kind)."""
+    acts = [random.choice(config.POSE_ACTIONS), random.choice(config.EXPRESSION_ACTIONS)]
+    random.shuffle(acts)
+    return acts
+
+
 @app.post("/attempt/{attempt_id}/challenge/start")
 def challenge_start(attempt_id: str) -> dict:
     at = _get_attempt(attempt_id)
@@ -280,7 +313,7 @@ def challenge_start(attempt_id: str) -> dict:
         if at.challenge is not None:
             raise HTTPException(409, "one challenge per attempt")
         at.challenge = {"challenge_id": str(uuid.uuid4()),
-                        "actions": random.sample(config.CHALLENGE_ACTIONS, 2),
+                        "actions": _stepup_actions(),
                         "started_mono": time.monotonic()}
         ch = at.challenge
     return {"challenge_id": ch["challenge_id"], "actions": ch["actions"],
@@ -441,13 +474,24 @@ def staff_verify(attempt_id: str, body: StaffBody) -> dict:
     return mine
 
 
+PASSIVE_GATE_NOTE = "DISABLED: calibration gate failed (6/10 genuine)"
+
+
 @app.get("/status")
 def status() -> dict:
     pending, synced = outbox.get().counts()
-    return {"mode": mode.current(), "pending_sync": pending, "synced": synced,
-            "policy_version": schedule.policy_version(),
+    m = mode.current()
+    pol = schedule.policy_state()
+    return {"mode": m, "pending_sync": pending, "synced": synced,
+            "policy_version": pol["version"],
             "kiosk_time": schedule.now().isoformat(timespec="seconds"),
-            "demo_clock": schedule.override_active()}
+            "demo_clock": schedule.override_active(),
+            "passive_allow": "ENABLED" if config.PASSIVE_ALLOW_ENABLED else PASSIVE_GATE_NOTE,
+            "challenge": "REQUIRED",
+            "identity_service": ("available" if m == "ONLINE" and identity.service_ok()
+                                 else "unavailable"),
+            "policy": pol,
+            "audit_queue": {"pending": pending, "synced": synced}}
 
 
 # --- v3: operator demo clock ---------------------------------------------------------

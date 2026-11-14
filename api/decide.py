@@ -16,6 +16,8 @@ signals = {
                 "identity": {"status", "similarity"} | None},
                # challenge.identity = CompareFaces re-run on a good challenge
                # frame. In the challenge phase it REPLACES top-level identity.
+  "quick_challenge": {"status": "PASS"|"FAIL"|"UNCERTAIN"|..., "action": str} | None,
+               # 2 s redesign: the ONE action shown at the tap, checked in the first pass
   "passive_deny_enabled": bool,   # False (default): passive SPOOF is logged only
   "schedule":  {"status": "PERMITTED"|"PROHIBITED"|"APPROVAL_REQUIRED"|"UNKNOWN",
                 "policy_version": str|None} | None,   # evaluated at decision time
@@ -27,10 +29,13 @@ threshold 4/10 times, so passive can neither approve nor deny by default.
 
 Order: ID_MISMATCH -> DENY (and passive SPOOF -> DENY only if
 passive_deny_enabled); schedule PROHIBITED -> DENY; OFFLINE -> STAFF_VERIFY.
-Online first pass ALWAYS ends REQUEST_VERIFICATION + CHALLENGE (reason says why).
-The only automatic ALLOW: challenge PASS + challenge-frame identity MATCH +
-good, continuous quality + schedule PERMITTED. Challenge FAIL, UNCERTAIN or
-anything else -> RECEPTION. APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
+2 s redesign: first-pass ALLOW = identity MATCH (on time) + quick 1-action
+challenge PASS + good, continuous quality + schedule PERMITTED + ONLINE.
+Anything else in the first pass -> REQUEST_VERIFICATION + CHALLENGE (the
+2-action step-up; may exceed 2 s, logged as total_ms). Step-up ALLOW =
+challenge PASS + challenge-frame MATCH + good quality + PERMITTED; step-up
+FAIL, UNCERTAIN or anything else -> RECEPTION. Passive is never required.
+APPROVAL_REQUIRED/UNKNOWN -> STAFF_VERIFY.
 """
 from typing import Any
 
@@ -46,6 +51,7 @@ _QUALITY_FAIL = {
     "QUALITY_DARK": ("QUALITY_DARK", "IMPROVE_LIGHT"),
     "MULTI_FACE": ("MULTI_FACE", "RETRY"),
     "NO_FACE": ("NO_FACE", "MOVE_CLOSER"),
+    "TRACKING_LOST": ("TRACKING_LOST", "HOLD_STILL"),
 }
 
 Decision = tuple[str, str, str]
@@ -99,10 +105,15 @@ def _deny(signals: dict) -> Decision | None:
 
 
 def _first_pass(signals: dict) -> Decision:
-    """Never ALLOW. Always REQUEST_VERIFICATION + CHALLENGE; reason = most useful hint."""
+    """ALLOW only on the quick-challenge whitelist; else REQUEST_VERIFICATION + CHALLENGE."""
     q = signals.get("quality")
     ident = signals.get("identity")
     passive = _status(signals.get("passive"))
+    quick = _status(signals.get("quick_challenge"))
+
+    if (quick == "PASS" and _status(ident) == "MATCH"
+            and _quality_ok(q) and _continuity_ok(q)):
+        return ALLOW, "OK_LIVE_MATCH", "NONE"  # schedule/mode still checked by decide()
 
     problem = _quality_problem(q)
     if problem:
@@ -111,9 +122,11 @@ def _first_pass(signals: dict) -> Decision:
         return REQUEST, "TIMEOUT", "CHALLENGE"
     if _status(ident) != "MATCH":
         return REQUEST, "ID_UNAVAILABLE", "CHALLENGE"
-    if passive not in ("LIVE", "UNCERTAIN", "SPOOF"):  # UNAVAILABLE / missing
+    if quick == "FAIL":
+        return REQUEST, "CHALLENGE_FAILED", "CHALLENGE"
+    if quick is None and passive not in ("LIVE", "UNCERTAIN", "SPOOF"):
         return REQUEST, "LIVENESS_UNAVAILABLE", "CHALLENGE"
-    return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"  # challenge is always required
+    return REQUEST, "LIVENESS_UNCERTAIN", "CHALLENGE"  # quick action not seen / not run
 
 
 def _after_challenge(signals: dict) -> Decision:

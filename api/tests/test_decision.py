@@ -46,6 +46,10 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "KIOSK_ZONE", "LAB-1")
     monkeypatch.setattr(mode, "current", lambda: "ONLINE")
     monkeypatch.setattr(config, "OUTBOX_PATH", str(tmp_path / "outbox.db"))
+    # Quick 1-action (and step-up) challenge: the person does the action.
+    monkeypatch.setattr(pipeline, "challenge_check", lambda f, t, pt, a: {
+        "status": "PASS", "reason": "CHALLENGE_PASSED", "per_action": [],
+        "passive": dict(LIVE)}, raising=False)
     schedule.set_override(WED_10)  # inside the allow window
     STORE.clear()
     yield TestClient(app)
@@ -59,9 +63,15 @@ def _start(c, user="u1"):
     return r.json()["attempt_id"]
 
 
-def _liveness(c, aid):
+def _liveness(c, aid, quick=False):
+    """quick=True: 2 s flow, 14 frames at 10 fps with the action prompt at 300 ms."""
+    if not quick:
+        return c.post(f"/attempt/{aid}/liveness",
+                      files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 3)
     return c.post(f"/attempt/{aid}/liveness",
-                  files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 3)
+                  data={"prompt_ts_ms": "300",
+                        "capture_ts_ms": [str(i * 100) for i in range(14)]},
+                  files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 14)
 
 
 def _identity(c, aid):
@@ -80,17 +90,25 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     flags = [True, False, None]
     schedules = [PERMITTED, None, {"status": "UNKNOWN"}, {"status": "APPROVAL_REQUIRED"}]
     modes = ["ONLINE", None, "OFFLINE"]
+    quicks = [None, {"status": "PASS"}, {"status": "FAIL"}, {"status": "UNCERTAIN"},
+              {"status": "UNAVAILABLE"}]
     combos = 0
-    for q, p, i, flag, sc, md in itertools.product(
-            qualities, passives, identities, flags, schedules, modes):
+    for q, p, i, flag, sc, md, qc in itertools.product(
+            qualities, passives, identities, flags, schedules, modes, quicks):
         d = decide({"quality": q, "passive": p, "identity": i, "challenge": None,
-                    "passive_allow_enabled": flag, "schedule": sc, "mode": md})
-        # Gate: the first pass NEVER allows -- even with every signal perfect
-        # and PASSIVE_ALLOW_ENABLED on. Online it always asks for a challenge.
-        assert d[0] == "REQUEST_VERIFICATION", (q, p, i, flag, sc, md, d)
-        assert d[2] == ("CHALLENGE" if md == "ONLINE" else "STAFF_VERIFY"), d
+                    "quick_challenge": qc, "passive_allow_enabled": flag,
+                    "schedule": sc, "mode": md})
+        # 2 s first pass: ALLOW only with on-time MATCH + quick 1-action PASS +
+        # good continuous quality + PERMITTED + ONLINE. Passive never matters
+        # (SPOOF included), and PASSIVE_ALLOW_ENABLED has no effect.
+        all_good = (q is GOOD_Q and i is MATCH and qc is not None and qc["status"] == "PASS"
+                    and sc is PERMITTED and md == "ONLINE")
+        assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, sc, md, qc, d)
+        assert d[0] != "DENY", d  # nothing in these lists is a hard negative
+        if md == "ONLINE" and not (qc and qc["status"] == "PASS"):
+            assert d[2] == "CHALLENGE", d  # quick FAIL/UNCERTAIN/missing -> 2-action step-up
         combos += 1
-    assert combos == 6 * 6 * 4 * 3 * 4 * 3
+    assert combos == 6 * 6 * 4 * 3 * 4 * 3 * 5
 
     # Challenge phase: ALLOW only with challenge PASS (+ MATCH, PERMITTED, ONLINE).
     # The challenge-frame passive status does not matter either way.
@@ -137,29 +155,31 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
 
 def test_b_late_result_is_ignored_and_attempts_are_isolated(client):
     a, b = _start(client), _start(client)
+    assert STORE.get(a).first_action in ("SMILE", "OPEN_MOUTH")
 
-    # A: identity arrives on time -> counted (first pass still asks for a
-    # challenge, per gate). B gets nothing from A's result.
+    # A: identity on time + quick action PASS -> first-pass ALLOW.
+    # B gets nothing from A's result.
     assert _identity(client, a).json()["identity"] == "MATCH"
     assert STORE.get(a).identity is not None
     assert STORE.get(b).identity is None
 
-    ra = _liveness(client, a).json()
-    assert (ra["decision"], ra["reason_code"], ra["next_action"]) == \
-        ("REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE")
+    ra = _liveness(client, a, quick=True).json()
+    assert (ra["decision"], ra["reason_code"]) == ("ALLOW", "OK_LIVE_MATCH")
+    assert ra["signals"]["challenge"]["status"] == "PASS"
     assert ra["signals"]["identity"]["status"] == "MATCH" and ra["attempt_id"] == a
 
-    # B: no identity before the deadline -> TIMEOUT, identity not counted.
-    rb = _liveness(client, b).json()
+    # B: same perfect quick action, but no identity before the deadline ->
+    # TIMEOUT + step-up. (If a late identity counted, B would be ALLOW.)
+    rb = _liveness(client, b, quick=True).json()
     assert (rb["decision"], rb["reason_code"]) == ("REQUEST_VERIFICATION", "TIMEOUT")
-    assert rb["signals"]["identity"]["status"] == "UNKNOWN"
+    assert rb["signals"]["identity"]["status"] == "UNKNOWN" and rb["next_action"] == "CHALLENGE"
     assert rb["attempt_id"] == b
 
     # A MATCH for B that arrives late is logged, stored aside, never used.
     assert _identity(client, b).status_code == 200
     assert STORE.get(b).identity is None and len(STORE.get(b).identity_late) == 1
-    again = _liveness(client, b).json()
-    assert again == rb  # first-pass decision is FINAL
+    again = _liveness(client, b, quick=True).json()
+    assert again == rb and again["decision"] != "ALLOW"  # first-pass decision is FINAL
 
     # A's decision is untouched by anything that happened to B.
     assert STORE.get(a).decision == ra
@@ -226,6 +246,9 @@ def test_d_perfect_biometrics_but_schedule_prohibited_is_deny(client, monkeypatc
     _identity(client, aid)
     assert _liveness(client, aid).json()["next_action"] == "CHALLENGE"
     ch = client.post(f"/attempt/{aid}/challenge/start").json()
+    # Step-up = exactly one pose + one expression, random order.
+    assert sorted(a in ("TURN_LEFT", "TURN_RIGHT") for a in ch["actions"]) == [False, True]
+    assert sorted(a in ("SMILE", "OPEN_MOUTH") for a in ch["actions"]) == [False, True]
     client.post("/operator/clock", json={"iso_time": WED_1230})
     r = client.post(f"/attempt/{aid}/challenge", data={"challenge_id": ch["challenge_id"]},
                     files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 3).json()
