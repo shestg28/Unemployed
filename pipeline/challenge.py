@@ -182,6 +182,12 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
         frames = [frames[i] for i in keep]
         ts = [ts[i] for i in keep]
 
+    # passive runs in its own thread while the landmarker works (both release the GIL);
+    # same inputs and same result as running it afterwards, just inside the time budget
+    _pas: dict = {}
+    _pas_thread = threading.Thread(target=lambda: _pas.update(p=_passive_on(frames, ts)), daemon=True)
+    _pas_thread.start()
+
     try:
         mets = []
         for f in frames:
@@ -204,7 +210,8 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     }
     tracking["ok"] = tracking["single_face_all"] and all(i >= C.Q_MIN_IOU for i in ious)
 
-    passive = _passive_on(frames, ts)
+    _pas_thread.join()
+    passive = _pas.get("p") or {"status": "UNAVAILABLE", "score": None, "reason": "PASSIVE_THREAD_FAILED"}
 
     per_action = []
     search_from = prompt_ts  # each action is searched for after the previous one started
