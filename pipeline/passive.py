@@ -22,8 +22,23 @@ import statistics
 import time
 
 from . import config as C
-from .frames import decode, faces_for
+from .challenge import metrics_for
+from .frames import decode
 from .silentface import get
+
+
+def _mp_faces(frame, img) -> list[dict]:
+    """MediaPipe FaceLandmarker box (integrator fix 14 Nov). RetinaFace scored our kiosk
+    webcam faces 0.15-0.23 (< 0.6), so passive never scored a frame. The landmark box is
+    passed to the upstream MiniFASNet crop unchanged (scales 2.7 / 4.0 still applied)."""
+    m = metrics_for(frame, img)
+    if m.get("n_faces") != 1 or not m.get("bbox"):
+        return [{"bbox": None}] * int(m.get("n_faces") or 0)
+    H, W = img.shape[:2]
+    x, y, w, h = m["bbox"]
+    x0, y0 = max(0, x), max(0, y)
+    w, h = min(W, x + w) - x0, min(H, y + h) - y0
+    return [{"bbox": [x0, y0, w, h]}] if w > 2 and h > 2 else []
 
 
 def passive_liveness(frames: list) -> dict:
@@ -44,8 +59,8 @@ def passive_liveness(frames: list) -> dict:
             if img is None:
                 per_frame.append({"score": None, "reason": "UNDECODABLE"})
                 continue
-            faces = faces_for(f, img, sf.detector)
-            if not faces:
+            faces = _mp_faces(f, img)
+            if len(faces) != 1 or not faces[0]["bbox"]:
                 per_frame.append({"score": None, "reason": "NO_FACE"})
                 continue
             r = sf.predict(img, faces[0]["bbox"])

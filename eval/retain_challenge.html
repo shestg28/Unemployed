@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>HID webcam check</title>
+<style>
+body { margin: 2rem auto; max-width: 44rem; padding: 0 1rem; font: 1.15rem system-ui; color: #101d37 }
+video { display: block; width: 640px; max-width: 100%; transform: scaleX(-1); margin-top: 1rem; background: #101d37 }
+button { padding: .65rem 1rem; font: inherit }
+</style>
+<h1>HID webcam check</h1>
+<p>Consenting teammates only. Approved trial frames are saved under data/gate on this PC.</p>
+<label>Prop <select id="scenario"><option value="print">Print</option><option value="phone">Phone photo</option><option value="replay">Replay video</option><option value="mask_cutout">Cutout mask</option><option value="mask_no_cutout">Mask without cutouts</option><option value="real">Live control</option><option value="phone" data-presentation="bigscreen1">Big-screen photo (bigscreen1)</option><option value="mask_cutout" data-presentation="improv1">Improvised partial-face prop (improv1)</option></select></label><button id="start">Start webcam check</button>
+<h2 id="prompt" aria-live="polite"></h2>
+<video id="preview" autoplay playsinline muted></video>
+<canvas id="capture" width="640" height="480" hidden></canvas>
+<script>
+const start = document.querySelector('#start');
+const preview = document.querySelector('#preview');
+const canvas = document.querySelector('#capture');
+const display = document.querySelector('#prompt');
+const ctx = canvas.getContext('2d');
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+start.onclick = async () => {
+  start.disabled = true;
+  const selected = document.querySelector('#scenario').selectedOptions[0];
+  const scenario = selected.value;
+  const presentation = selected.dataset.presentation || 'standard';
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    preview.srcObject = stream;
+    await preview.play();
+    const actionsResponse = await fetch('/actions', {method:'POST'});
+    if (!actionsResponse.ok) throw Error('Could not load prompts');
+    const actions = await actionsResponse.json();
+    for (let second = 5; second >= 1; second--) {
+      display.textContent = 'Face forward and stay neutral. Starting in ' + second;
+      await sleep(1000);
+    }
+    const frames = [], times = [];
+    canvas.width = Math.min(preview.videoWidth, 640);
+    canvas.height = Math.round(canvas.width * preview.videoHeight / preview.videoWidth);
+    const snap = () => {
+      times.push(performance.now());
+      ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL('image/jpeg', .72).split(',')[1]);
+    };
+    for (let i = 0; i < 5; i++) { snap(); await sleep(100); }
+    display.textContent = '1. ' + actions[0];
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const prompt = performance.now();
+    while (performance.now() - prompt < 4750) {
+      if (performance.now() - prompt >= 2050) display.textContent = '2. ' + actions[1];
+      snap();
+      await sleep(100);
+    }
+    stream.getTracks().forEach(track => track.stop());
+    preview.srcObject = null;
+    display.textContent = 'Checking…';
+    const response = await fetch('/check', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({frames, times, prompt, scenario, presentation})
+    });
+    if (!response.ok) throw Error('Could not process webcam frames');
+    const result = await response.json();
+    display.textContent = result.status + ' · ' + result.actions_completed + '/' +
+      result.actions_prompted + ' actions · ' + result.frames + ' saved frames · ' + result.capture_id;
+  } catch (error) {
+    display.textContent = 'Camera check could not finish. ' + error.message;
+    start.disabled = false;
+  } finally {
+    start.disabled = false;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    preview.srcObject = null;
+  }
+};
+</script></html>

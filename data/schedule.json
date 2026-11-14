@@ -1,0 +1,56 @@
+{
+  "policy_version": "demo-v1",
+  "expires_utc": "2026-11-14T18:29:00Z",
+  "users": {
+    "akash": {
+      "zone": "main_gate",
+      "windows": [
+        {
+          "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          "start": "08:00",
+          "end": "20:00",
+          "effect": "allow"
+        }
+      ]
+    },
+    "siddanth": {
+      "zone": "main_gate",
+      "windows": [
+        {
+          "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          "start": "08:00",
+          "end": "12:00",
+          "effect": "allow"
+        },
+        {
+          "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          "start": "12:00",
+          "end": "23:59",
+          "effect": "deny"
+        }
+      ]
+    },
+    "shesh": {
+      "zone": "main_gate",
+      "windows": [
+        {
+          "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          "start": "08:00",
+          "end": "20:00",
+          "effect": "approval"
+        }
+      ]
+    },
+    "siddhant": {
+      "zone": "main_gate",
+      "windows": [
+        {
+          "days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          "start": "08:00",
+          "end": "20:00",
+          "effect": "allow"
+        }
+      ]
+    }
+  }
+}

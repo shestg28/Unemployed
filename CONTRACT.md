@@ -106,3 +106,29 @@ challenge_check(frames, ts, prompt_ts, actions) -> {status: PASS|FAIL|UNCERTAIN,
 - Stubs must return UNAVAILABLE and be labelled STUB; they can never produce ALLOW.
 - Logs: logs/attempts.jsonl, one line per decision, no images.
 - AWS creds (.env) and enroll/ photos stay server-side and gitignored. Never commit face images.
+
+## v3 additions (14 Nov, surprise challenges). Existing v2 API unchanged. REQUEST_VERIFICATION is displayed as "STEP-UP VERIFICATION".
+New reason codes: SCHEDULE_DENIED, SCHEDULE_APPROVAL_REQUIRED, SCHEDULE_UNKNOWN, OFFLINE_STAFF_REQUIRED, STAFF_VERIFIED, STAFF_REJECTED
+New next_action: STAFF_VERIFY
+Every decision response adds: schedule:{status: PERMITTED|PROHIBITED|APPROVAL_REQUIRED|UNKNOWN, policy_version}, mode: ONLINE|OFFLINE
+GET  /status -> {mode, pending_sync, synced, policy_version, kiosk_time}
+POST /attempt/{id}/staff_verify  json {operator_pin, id_checked:bool, reason, approve:bool}
+  -> final decision (STAFF_VERIFIED -> ALLOW only if schedule not PROHIBITED and no SPOOF; else DENY/blocked)
+POST /operator/clock  json {iso_time|null}   # demo-only clock override, null = real time; shown on screen as "DEMO CLOCK"
+Schedule file: data/schedule.json (fictional demo data; Siddhant owns). Times are Asia/Kolkata.
+Sync: minimal decision events queued in SQLite (logs/outbox.db), uploaded to S3 key events/<event_id>.json; never images, embeddings or credentials.
+
+## v4 additions (14 Nov, 2-second first pass). Team decision: first pass incl. challenge <= 2 s.
+Passive gate NO-GO: passive never ALLOWs and never DENYs (PASSIVE_ALLOW_ENABLED=0, PASSIVE_DENY_ENABLED=0); scores are logged only.
+POST /attempt/start          -> adds action: SMILE|OPEN_MOUTH   # browser shows it at the tap
+                                deadline_ms = server_t0_ms + 1800
+POST /attempt/{id}/liveness  multipart adds prompt_ts_ms; frames[] ~14 jpeg at ~10 fps over ~1.4 s (max 16), capture_ts_ms[] required
+  # >= 2 frames must have capture_ts_ms < prompt_ts_ms (baseline): keep capturing before the prompt appears
+  -> signals adds challenge:{action, status: PASS|FAIL|UNCERTAIN|UNAVAILABLE, reason}; stage_ms adds challenge
+First-pass ALLOW = identity MATCH (on time) + 1-action PASS + good quality + schedule PERMITTED + ONLINE.
+1-action FAIL/UNCERTAIN -> REQUEST_VERIFICATION, next_action CHALLENGE (2-action step-up; may exceed 2 s; logged as total_ms).
+Step-up challenge/start actions = exactly one of TURN_LEFT|TURN_RIGHT + one of SMILE|OPEN_MOUTH, random order.
+Step-up FAIL/UNCERTAIN -> RECEPTION. Offline unchanged: staff verify, no challenge.
+GET /status adds: passive_allow ("DISABLED: calibration gate failed (6/10 genuine)"), challenge: "REQUIRED",
+  identity_service: available|unavailable, policy:{status: current|expired|missing, version, expires_utc},
+  audit_queue:{pending, synced}
