@@ -19,7 +19,7 @@ def vote_result(scores, rng=random):
     selected = rng.sample(valid, 6)
     votes = sum(s > .85 for s in selected)
     low = sum(s < .75 for s in selected)
-    outcome = 'APPROVED' if votes >= 4 else 'REJECTED' if low >= 4 else 'CHALLENGE REQUIRED'
+    outcome = 'APPROVED' if votes >= 4 else 'REJECTED' if low >= 4 else 'REQUEST VERIFICATION'
     return outcome, selected, votes
 
 
@@ -54,7 +54,7 @@ def main():
             raise ValueError('Cannot read sample')
         print(score(frame), flush=True)
         return
-    if not warmup_challenge():
+    if args.mode == 'challenge' and not warmup_challenge():
         raise RuntimeError('Challenge unavailable; refusing to start combined demo')
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
