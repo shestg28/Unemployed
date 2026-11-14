@@ -71,7 +71,7 @@ def main():
     prompt_ts = None
     trial_scores = []
     active_mode = args.mode
-    step_up = False
+    step_up = args.mode == 'challenge'
     try:
         while True:
             ok, frame = cap.read()
@@ -159,7 +159,7 @@ def main():
                 if challenge_job is None or challenge_job.done():
                     challenge_job = None
                     active_mode = args.mode
-                    step_up = False
+                    step_up = args.mode == 'challenge'
                     armed = True
                     result_text = 'Waiting for face detection'
     finally:
