@@ -14,6 +14,18 @@ Have Anil run the kiosk while Siddhant presents the approved props. Record the c
 
 Counts supplied by the tester and sent to Sidhant and Sonu in [issue #3](https://github.com/shestg28/Unemployed/issues/3). Source logs, per-attempt IDs and final kiosk access decisions have not been supplied. Prints and both masks were not tested because the props were unavailable. Replay and genuine totals exceeded the original plan. Optional big-screen and improvised-prop trials have no results yet and must be labeled separately.
 
+## Additional captured live-face trials
+
+The tester confirmed these three captures used their live face after initially selecting bigscreen1. Their labels and 148 saved frames were corrected to real locally, with original metadata retained. These results are reported separately from the earlier counts because overlap with those reported totals is unknown.
+
+| Attempt | Capture ID | Outcome | Validity |
+|---|---|---|---|
+| 1 | 7b6cb09eedc94202aff1f19eabf8e553 | PASS, 2/2 actions | Included |
+| 2 | 15e8de5312af4ae78d1d8285902c5d3e | UNCERTAIN, TRACKING_LOST | Excluded because tester reported improper execution |
+| 3 | 62c932467e104537859faf0efa66df69 | UNCERTAIN, TRACKING_LOST | Included |
+
+Valid genuine attempts in this batch: 1/2 PASS and 1/2 UNCERTAIN. Big-screen spoof attempts in this batch: 0. All three original outcomes remain recorded.
+
 Copy these counts to the calibration slide after Anil’s run. The earlier 30-frame camera test measured the passive model, while this run measures the live challenge path. Report each with its own denominator.
 
 ## Attempt record — due 14:30 IST
