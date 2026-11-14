@@ -47,9 +47,11 @@ a challenge PASS is required before any ALLOW.
 """
 from __future__ import annotations
 
+import hashlib
 import statistics
 import threading
 import time
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -116,6 +118,37 @@ def face_metrics(img_bgr: np.ndarray) -> dict:
     return out
 
 
+_mcache: "OrderedDict[str, dict]" = OrderedDict()
+_mcache_lock = threading.Lock()
+_MCACHE_MAX = 64
+
+
+def metrics_for(frame, img_bgr: np.ndarray) -> dict:
+    """face_metrics(img), memoised by frame bytes so quality() and challenge_check()
+    (which run on the same burst, often in parallel) don't landmark a frame twice."""
+    key = hashlib.sha1(frame).hexdigest() if isinstance(frame, (bytes, bytearray)) else None
+    if key is not None:
+        with _mcache_lock:
+            if key in _mcache:
+                _mcache.move_to_end(key)
+                return _mcache[key]
+    m = face_metrics(img_bgr)
+    if key is not None:
+        with _mcache_lock:
+            _mcache[key] = m
+            while len(_mcache) > _MCACHE_MAX:
+                _mcache.popitem(last=False)
+    return m
+
+
+def landmarker_ok() -> bool:
+    try:
+        _landmarker()
+        return True
+    except Exception:
+        return False
+
+
 def _metric(m: dict, action: str) -> float | None:
     if action == "SMILE":
         return m["smile"]
@@ -174,7 +207,7 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
         mets = []
         for f in frames:
             img = decode(f)
-            mets.append(face_metrics(img) if img is not None else
+            mets.append(metrics_for(f, img) if img is not None else
                         {"n_faces": 0, "smile": None, "jaw": None, "yaw": None, "bbox": None})
     except Exception as e:
         return done("UNCERTAIN", f"LANDMARKER_UNAVAILABLE: {e}"[:200])

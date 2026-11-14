@@ -6,6 +6,11 @@ select_frames(frames,ts) -> indices of up to SELECT_MAX usable, time-spaced fram
                             chosen by QUALITY ONLY (never by liveness score)
 
 Frames are JPEG/PNG bytes (or BGR ndarrays). Decoded in memory only.
+
+Face box / count / continuity come from the MediaPipe FaceLandmarker (same model
+the challenge uses). The Silent-Face RetinaFace detector scored our kiosk webcam
+faces at 0.15-0.23 (< 0.6) -> NO_FACE on clearly visible faces, so it is now used
+only for the MiniFASNet crop inside passive_liveness (log-only). [integrator fix 14 Nov]
 fail_reason values are CONTRACT reason codes:
   NO_FACE, MULTI_FACE, QUALITY_TOO_SMALL, QUALITY_DARK, QUALITY_BLUR, TRACKING_LOST
 """
@@ -17,8 +22,8 @@ import cv2
 import numpy as np
 
 from . import config as C
-from .frames import decode, faces_for
-from .silentface import SilentFaceUnavailable, get_detector
+from .challenge import landmarker_ok, metrics_for
+from .frames import decode
 
 _BLUR_SIZE = (160, 160)  # face crop is resized before Laplacian so blur is scale-independent
 
@@ -32,17 +37,29 @@ def _iou(a: list[int], b: list[int]) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _frame_quality(frame, detector) -> dict:
+def _mp_box(m: dict, img) -> list[int] | None:
+    """MediaPipe landmark box clamped to the frame."""
+    if not m.get("bbox"):
+        return None
+    H, W = img.shape[:2]
+    x, y, w, h = m["bbox"]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    return [x0, y0, x1 - x0, y1 - y0] if x1 - x0 > 2 and y1 - y0 > 2 else None
+
+
+def _frame_quality(frame) -> dict:
     img = decode(frame)
     if img is None:
         return {"face_count": 0, "face_px": 0, "blur": 0.0, "brightness": 0.0,
                 "bbox": None, "ok": False, "fail_reason": "NO_FACE"}
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = faces_for(frame, img, detector)
-    rec = {"face_count": len(faces), "face_px": 0, "blur": 0.0,
+    m = metrics_for(frame, img)
+    box = _mp_box(m, img)
+    rec = {"face_count": int(m.get("n_faces") or 0), "face_px": 0, "blur": 0.0,
            "brightness": round(float(gray.mean()), 1), "bbox": None}
-    if faces:
-        x, y, w, h = faces[0]["bbox"]
+    if box:
+        x, y, w, h = box
         crop = gray[y:y + h, x:x + w]
         if crop.size:
             rec["bbox"] = [x, y, w, h]
@@ -76,13 +93,11 @@ def quality(frames: list) -> dict:
     ok requires >= Q_MIN_USABLE usable frames AND continuity (exactly one face in
     every frame, consecutive face-box IoU >= Q_MIN_IOU, i.e. the same face throughout).
     """
-    try:
-        detector = get_detector()
-    except SilentFaceUnavailable:
+    if not landmarker_ok():
         return {"per_frame": [], "ok": False, "fail_reason": "LIVENESS_UNAVAILABLE",
                 "continuity_ok": False, "summary": {"n_frames": len(frames), "n_usable": 0,
                                                     "detector": "UNAVAILABLE"}}
-    per = [_frame_quality(f, detector) for f in frames]
+    per = [_frame_quality(f) for f in frames]
 
     single = all(p["face_count"] == 1 and p["bbox"] for p in per)
     ious = [round(_iou(a["bbox"], b["bbox"]), 3) for a, b in zip(per, per[1:])
