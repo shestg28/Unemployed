@@ -41,6 +41,9 @@ def get_client():
                         connect_timeout=C.CONNECT_TIMEOUT_S,
                         read_timeout=C.READ_TIMEOUT_S,
                         retries={"max_attempts": 1, "mode": "standard"},
+                        # Reuse warm HTTPS connections across calls/threads.
+                        tcp_keepalive=True,
+                        max_pool_connections=50,
                     ),
                 )
     return _client

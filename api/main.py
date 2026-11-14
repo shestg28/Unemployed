@@ -28,7 +28,8 @@ CHALLENGE_IDENTITY_TIMEOUT_S = 2.0
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     identity.load_enrolled()   # reference bytes, once
-    identity.init_client()     # shared boto3 client, once
+    identity.init_client()     # shared boto3 client, once (keep-alive pool)
+    identity.warm_up()         # throwaway CompareFaces: pay TLS setup now
     stubs = signals.stubs_in_use()
     if stubs:
         log.warning("STUB pipeline functions in use (never ALLOW): %s", stubs)
