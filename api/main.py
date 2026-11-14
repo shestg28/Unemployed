@@ -164,6 +164,7 @@ def _decision_signals(q, p, ident, challenge=None, *, user_id: str, quick=None) 
                     {"status": ident.get("identity"), "similarity": ident.get("similarity")},
         "challenge": challenge,
         "quick_challenge": quick,
+        "quick_requires_passive_live": config.QUICK_REQUIRES_PASSIVE_LIVE,
         "passive_allow_enabled": config.PASSIVE_ALLOW_ENABLED,
         "passive_deny_enabled": config.PASSIVE_DENY_ENABLED,
     }

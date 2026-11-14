@@ -103,22 +103,31 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
                     "quick_challenge": qc, "passive_allow_enabled": flag,
                     "schedule": sc, "mode": md})
         # 2 s first pass: ALLOW only with on-time MATCH + quick 1-action PASS +
-        # good continuous quality + PERMITTED + ONLINE + passive not SPOOF.
-        # Passive LIVE is never needed and PASSIVE_ALLOW_ENABLED has no effect.
+        # good continuous quality + PERMITTED + ONLINE + passive LIVE (flag
+        # QUICK_REQUIRES_PASSIVE_LIVE, default on). PASSIVE_ALLOW_ENABLED: no effect.
         all_good = (q is GOOD_Q and i is MATCH and qc is not None and qc["status"] == "PASS"
                     and sc is PERMITTED and md == "ONLINE"
-                    and not (p and p.get("status") == "SPOOF"))  # passive downgrade
+                    and _status_of(p) == "LIVE")  # QUICK_REQUIRES_PASSIVE_LIVE (default on)
         assert (d[0] == "ALLOW") == all_good, (q, p, i, flag, sc, md, qc, d)
         assert d[0] != "DENY", d  # nothing in these lists is a hard negative
-        if md == "ONLINE" and (not (qc and qc["status"] == "PASS")
-                               or (p and p.get("status") == "SPOOF")):
-            assert d[2] == "CHALLENGE", d  # quick FAIL/UNCERTAIN/missing or SPOOF -> step-up
+        if md == "ONLINE" and not (qc and qc["status"] == "PASS" and _status_of(p) == "LIVE"):
+            assert d[2] == "CHALLENGE", d  # quick not PASS, or passive not LIVE -> step-up
         combos += 1
     assert combos == 6 * 6 * 4 * 3 * 4 * 3 * 5
+
+    # QUICK_REQUIRES_PASSIVE_LIVE: passive UNCERTAIN blocks the quick ALLOW when on
+    # (default / flag missing) and is allowed through only when flipped off.
+    quick_unc = {"quality": GOOD_Q, "passive": {"status": "UNCERTAIN", "score": 0.55},
+                 "identity": MATCH, "challenge": None, "quick_challenge": {"status": "PASS"},
+                 "passive_allow_enabled": False, **OK}
+    assert [decide(quick_unc)[2], decide({**quick_unc, "quick_requires_passive_live": True})[2],
+            decide({**quick_unc, "quick_requires_passive_live": False})[0]] == \
+        ["CHALLENGE", "CHALLENGE", "ALLOW"]
 
     # Passive downgrade (1): perfect quick path + passive SPOOF -> step-up, never DENY.
     assert decide({"quality": GOOD_Q, "passive": {"status": "SPOOF", "score": 0.05},
                    "identity": MATCH, "challenge": None, "quick_challenge": {"status": "PASS"},
+                   "quick_requires_passive_live": False,  # SPOOF blocks even with flag off
                    "passive_allow_enabled": False, **OK}) == \
         ("REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE")
 

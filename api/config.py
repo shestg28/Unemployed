@@ -45,6 +45,9 @@ PASSIVE_ALLOW_ENABLED = _flag("PASSIVE_ALLOW_ENABLED", False)  # gate: stays off
 # GATE NO-GO: genuine faces scored below threshold 4/10 times. Off -> passive
 # SPOOF never causes DENY; passive status/score are logged only.
 PASSIVE_DENY_ENABLED = _flag("PASSIVE_DENY_ENABLED", False)
+# Quick-path ALLOW needs passive == LIVE (on) or only passive != SPOOF (off).
+# UNCERTAIN/SPOOF then go to the 2-action step-up. Never DENYs either way.
+QUICK_REQUIRES_PASSIVE_LIVE = _flag("QUICK_REQUIRES_PASSIVE_LIVE", True)
 # detect_labels is a logged signal only; it never changes a decision.
 LABELS_SIGNAL_ENABLED = _flag("LABELS_SIGNAL_ENABLED", False)
 
