@@ -71,7 +71,10 @@ def _f(name: str, default: float) -> float:
 
 
 Q_MIN_FACE_PX = _f("Q_MIN_FACE_PX", 90)        # shorter side of the face box, frame pixels
-Q_MIN_BLUR = _f("Q_MIN_BLUR", 30)              # Laplacian variance of the face crop resized to 160x160
+# Q_MIN_BLUR: Laplacian variance of the face crop resized to 160x160. Default from the live
+# kiosk webcam (14 Nov, demo_page genuine attempts): lowest genuine frame 9.8-11.1, typical
+# 15-30 -> ~half the lowest genuine value. 30 rejected real people (QUALITY_BLUR).
+Q_MIN_BLUR = _f("Q_MIN_BLUR", 5)
 Q_MIN_BRIGHTNESS = _f("Q_MIN_BRIGHTNESS", 60)  # mean grey (0-255) of the face crop (whole frame if no face)
 Q_MIN_IOU = _f("Q_MIN_IOU", 0.3)               # bbox IoU between consecutive frames
 Q_MIN_USABLE = int(_f("Q_MIN_USABLE", 2))      # usable frames needed for the burst to be ok
