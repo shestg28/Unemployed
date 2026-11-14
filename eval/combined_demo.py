@@ -9,12 +9,23 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import math
+
+
+def vote_result(scores, rng=random):
+    valid = [s for s in scores if s is not None and math.isfinite(s) and 0 <= s <= 1]
+    if len(valid) < 6:
+        return 'REQUEST VERIFICATION', [], 0
+    selected = rng.sample(valid, 6)
+    votes = sum(s > .75 for s in selected)
+    return ('APPROVED' if votes >= 4 else 'REJECTED'), selected, votes
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pipeline-root', required=True)
     parser.add_argument('--sample')
+    parser.add_argument('--mode', choices=['challenge', 'vote'], default='challenge')
     args = parser.parse_args()
     sys.path.insert(0, str(Path(args.pipeline_root).resolve()))
     import cv2
@@ -29,11 +40,11 @@ def main():
         faces = detector.detect(frame)
         detected_at = time.perf_counter()*1000
         if len(faces) != 1:
-            return None, 'Exactly one face required', detected_at
+            return None, 'Exactly one face required', detected_at, None
         x1, y1, x2, y2 = faces[0].bbox.astype(int)
         box = [int(x1), int(y1), int(x2-x1), int(y2-y1)]
         result = ensemble.predict(frame, box)
-        return box, f"V2 + V1SE live score: {result['live_score']:.4f} (not a probability)", detected_at
+        return box, f"V2 + V1SE live score: {result['live_score']:.4f} (not a probability)", detected_at, result['live_score']
 
     if args.sample:
         frame = cv2.imread(args.sample)
@@ -41,7 +52,7 @@ def main():
             raise ValueError('Cannot read sample')
         print(score(frame), flush=True)
         return
-    if not warmup_challenge():
+    if args.mode == 'challenge' and not warmup_challenge():
         raise RuntimeError('Challenge unavailable; refusing to start combined demo')
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -56,6 +67,7 @@ def main():
     armed = True
     box, message = None, 'Looking for one face'
     prompt_ts = None
+    trial_scores = []
     try:
         while True:
             ok, frame = cap.read()
@@ -65,9 +77,10 @@ def main():
             view = frame.copy()
             if score_job is not None and score_job.done():
                 try:
-                    box, message, detected_at = score_job.result()
+                    box, message, detected_at, live_score = score_job.result()
                 except Exception as exc:
                     box, message = None, 'UNAVAILABLE: ' + str(exc)[:60]
+                    live_score = None
                 score_job = None
                 if box is not None and armed and started is None:
                     started = detected_at
@@ -75,6 +88,9 @@ def main():
                     frames, stamps = [], []
                     prompt_ts = None
                     armed = False
+                    trial_scores = []
+                if started is not None and box is not None and detected_at >= started and time.perf_counter()*1000 <= started+2000:
+                    trial_scores.append(live_score)
             if score_job is None:
                 score_job = pool.submit(score, frame.copy())
             if started is not None:
@@ -85,9 +101,11 @@ def main():
                 elapsed = max(0, now-started)
                 prompt = 'Hold neutral for baseline' if elapsed < 400 else ' THEN '.join(actions)
                 result_text = f'{elapsed/1000:.1f}/2.0s: {prompt}'
+                if args.mode == 'vote':
+                    result_text = f'{elapsed/1000:.1f}/2.0s: collecting scores ({len(trial_scores)})'
                 if elapsed >= 400 and prompt_ts is None:
                     prompt_ts = now
-                if elapsed >= 1400 and challenge_job is None:
+                if args.mode == 'challenge' and elapsed >= 1400 and challenge_job is None:
                     challenge_job = pool.submit(challenge_check, list(frames), list(stamps), prompt_ts, actions)
                 if elapsed >= 2000:
                     result = {'status': 'UNCERTAIN', 'reason': 'DEADLINE'}
@@ -99,6 +117,12 @@ def main():
                     outcome = 'LIVENESS PASS (identity/policy required)' if result['status'] == 'PASS' else 'REQUEST VERIFICATION'
                     if result['status'] == 'FAIL':
                         outcome = 'DENY: challenge failed'
+                    if args.mode == 'vote':
+                        outcome, selected, votes = vote_result(trial_scores)
+                        result = {'status': 'NOT_RUN', 'reason': 'EXPERIMENTAL_PASSIVE_VOTE'}
+                        print({'mode': 'vote', 'selected_scores': selected, 'above_075': votes,
+                               'n_selected': len(selected), 'n_available': len(trial_scores)}, flush=True)
+                        outcome += f' ({votes}/{len(selected)} above 0.75)'
                     result_text = f'{outcome} | {elapsed:.0f}ms | C to retry'
                     print({'outcome': outcome, 'elapsed_ms': round(elapsed, 1), 'challenge': result['status'],
                            'reason': result.get('reason'), 'late_result_can_change_decision': False}, flush=True)
@@ -109,7 +133,8 @@ def main():
                 cv2.rectangle(view,(x,y),(x+w,y+h),(255,180,0),2)
             cv2.putText(view, message, (12,30), 0, .48, (255,255,255), 1)
             cv2.putText(view, result_text, (12,65), 0, .48, (0,255,255), 1)
-            cv2.putText(view, 'Experimental | challenge mandatory | identity + policy still required',
+            footer = 'EXPERIMENTAL VOTE ONLY - not access authorization' if args.mode == 'vote' else 'Experimental | challenge mandatory | identity + policy still required'
+            cv2.putText(view, footer,
                         (12,view.shape[0]-18), 0, .43, (255,255,255), 1)
             cv2.imshow(window, view)
             key = cv2.waitKey(1) & 255

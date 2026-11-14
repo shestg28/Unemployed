@@ -1,5 +1,18 @@
 # Experimental combined demo
 
+## Optional passive voting experiment
+
+Add `--mode vote` to run the requested passive-only experiment. Within the two-second
+trial, collect completed scores from distinct webcam frames, then uniformly sample
+six scores without replacement. Four or more strictly greater than 0.75 gives
+APPROVED; three or fewer gives REJECTED. Exactly 0.75 does not count. Fewer than
+six finite valid scores gives REQUEST VERIFICATION. Scores completed after the
+deadline are excluded. Selected scores/counts and actual elapsed time print to the
+console; frames stay in memory. This sampling is random among scored frames, not
+all camera frames. The challenge is not run in this opt-in mode. APPROVED is an
+experimental passive vote, not a door authorization or validated spoof verdict.
+The default challenge mode and production pipeline remain unchanged.
+
 Entry point: `eval/combined_demo.py` on `siddhant/eval`.
 Uses UniFace RetinaFace plus the existing HID MiniFASNet V2/V1SE ensemble;
 does not count V2 twice. No face frames are saved. No production flags changed.
