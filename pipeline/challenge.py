@@ -196,6 +196,9 @@ def challenge_check(frames: list, ts: list[float], prompt_ts: float, actions: li
     tracking = {
         "frames": len(mets),
         "frames_in": n_in,
+        "face_frames": sum(1 for m in mets if m["n_faces"] >= 1),  # diagnostics only
+        "face_px": int(statistics.median([m["bbox"][3] for m in mets if m["bbox"]]))
+        if any(m["bbox"] for m in mets) else None,
         "single_face_all": all(m["n_faces"] == 1 for m in mets),
         "min_iou": round(min(ious), 3) if ious else None,
     }
