@@ -37,3 +37,10 @@ coverage/
 Thumbs.db
 .idea/
 .vscode/
+
+# v2: server-side enrolment, data media, logs
+enroll/
+data/**/*.jpg
+data/**/*.png
+data/**/*.mp4
+logs/

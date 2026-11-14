@@ -68,3 +68,41 @@ Response:
 - 15:30  Test results table exists with real numbers
 - 17:00  CODE FREEZE. Recorded demo video on disk.
 - 17:00-18:00  Three timed rehearsals
+
+## v2 attempt API (added 14 Nov). /verify kept: same request/response shape, now routed through the decision engine.
+
+Decisions: ALLOW | REQUEST_VERIFICATION | DENY
+Reason codes: OK_LIVE_MATCH, SPOOF_PASSIVE, ID_MISMATCH, ID_UNAVAILABLE, LIVENESS_UNCERTAIN,
+  LIVENESS_UNAVAILABLE, QUALITY_TOO_SMALL, QUALITY_BLUR, QUALITY_DARK, MULTI_FACE, NO_FACE,
+  TRACKING_LOST, TIMEOUT, CHALLENGE_FAILED, MANUAL_REVIEW
+next_action: NONE | MOVE_CLOSER | HOLD_STILL | IMPROVE_LIGHT | CHALLENGE | RETRY | RECEPTION
+
+### Browser -> API
+POST /attempt/start          json {user_id, consent:true}
+  -> {attempt_id, server_t0_ms, deadline_ms}            # deadline = t0 + 1700
+POST /attempt/{id}/identity  multipart: frame (jpeg <=640px), capture_ts_ms
+  -> {identity: MATCH|MISMATCH|UNKNOWN, similarity|null, ms}
+  # Browser fires this WITHOUT awaiting, as soon as it has the first frame.
+POST /attempt/{id}/liveness  multipart: frames[] (~6 jpeg over ~1s), capture_ts_ms[], scenario (optional)
+  -> {decision, reason_code, message, next_action, attempt_id,
+      signals:{quality, passive:{status,score}, identity:{status,similarity}},
+      stage_ms:{quality, passive, identity_wait, decide}, first_pass_server_ms}
+  # Server waits for identity until deadline, then decides. First-pass decision is FINAL.
+POST /attempt/{id}/challenge/start
+  -> {challenge_id, actions:[2 of SMILE|OPEN_MOUTH|TURN_LEFT|TURN_RIGHT], baseline_ms:400, timeout_ms:5000}
+POST /attempt/{id}/challenge multipart: frames[], capture_ts_ms[], prompt_ts_ms, challenge_id
+  -> same shape as /liveness, plus total_ms. One challenge per attempt; unresolved -> RECEPTION.
+
+### API -> pipeline (Python functions in /pipeline)
+quality(frames) -> {per_frame:[{face_count, face_px, blur, brightness, ok, fail_reason}], ok, fail_reason, continuity_ok}
+select_frames(frames, ts) -> indices   # by quality + time spacing ONLY, never by liveness score
+passive_liveness(frames) -> {status: LIVE|SPOOF|UNCERTAIN|UNAVAILABLE, score, per_frame}
+challenge_check(frames, ts, prompt_ts, actions) -> {status: PASS|FAIL|UNCERTAIN, per_action, passive}
+
+### Rules
+- Unknown attempt_id -> 404. Results for an old attempt never touch a new one.
+- A missing, failed, late or UNAVAILABLE signal is NEVER a pass.
+- Late results are logged and never change a decision.
+- Stubs must return UNAVAILABLE and be labelled STUB; they can never produce ALLOW.
+- Logs: logs/attempts.jsonl, one line per decision, no images.
+- AWS creds (.env) and enroll/ photos stay server-side and gitignored. Never commit face images.
