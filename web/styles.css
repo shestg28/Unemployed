@@ -94,9 +94,17 @@ body[data-screen="result"] .screen-result { display: block; animation: fade 0.18
 .id-input:disabled { opacity: 0.6; }
 .id-help { min-height: 20px; margin-top: 6px; text-align: center; font-size: 14px; color: var(--deny); }
 
+/* Identify mode: no ID field, one Verify button */
+body.identify .id-label,
+body.identify .id-input { display: none; }
+body.identify .id-row { justify-content: center; }
+body.identify .id-row .btn { height: 56px; padding: 0 56px; font-size: 20px; }
+
+/* --cam-ar is set from the camera's real resolution (16:9 until known), so the frame matches the video */
 .camera {
-  position: relative; width: 100%; margin: 8px auto 0;
-  aspect-ratio: 16 / 9; max-height: 60vh;
+  position: relative; margin: 8px auto 0;
+  width: min(100%, calc(60vh * var(--cam-ar, 1.7778)));
+  aspect-ratio: var(--cam-ar, 1.7778);
   border-radius: var(--radius); overflow: hidden;
   background: #000; border: 1px solid var(--line);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
@@ -226,7 +234,7 @@ body[data-screen="challenge"] .hint { display: none; }
   .bar-right { gap: 14px; }
   .stage { padding: 20px 16px; }
   .title { font-size: 30px; }
-  .camera { max-height: none; }
+  .camera { width: 100%; }
   .hint { font-size: 17px; }
   .result { padding: 28px 18px; }
   .result-heading { font-size: 32px; }

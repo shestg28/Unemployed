@@ -23,7 +23,12 @@ const CONFIG = {
   // "" = same origin (use web/serve.py to proxy the API). URL override: ?api=http://host:8000
   API_BASE: params.get("api") || "",
 
-  // Optional suggestions for the ID field (ids only, no names shown). Empty = free text.
+  // Face-only identification: no ID field; the server matches the face against every enrolled photo (1:N).
+  // Needs the backend to accept /attempt/start without user_id (see web/IDENTIFY_API.md).
+  // false = 1:1 mode with the ID field. URL override: ?identify=0 / ?identify=1
+  IDENTIFY_MODE: params.has("identify") ? params.get("identify") !== "0" : true,
+
+  // Optional suggestions for the ID field in 1:1 mode (ids only, no names shown). Empty = free text.
   ENROLLED_IDS: [],
   USER_ID_RE: /^[A-Za-z0-9_-]{1,64}$/, // same rule as api/identity.py
 
@@ -54,7 +59,9 @@ const CONFIG = {
 const enc = encodeURIComponent;
 
 const realApi = {
-  startAttempt: ({ user_id }) => postJson("/attempt/start", { user_id, consent: true, scenario: state.scenario }),
+  // Identify mode omits user_id entirely; 1:1 mode sends the typed ID.
+  startAttempt: ({ user_id }) =>
+    postJson("/attempt/start", { ...(user_id ? { user_id } : {}), consent: true, scenario: state.scenario }),
 
   identity: ({ attempt_id, frame }) =>
     postForm(`/attempt/${enc(attempt_id)}/identity`, [
@@ -120,6 +127,7 @@ const nowEpochMs = () => Math.round(performance.timeOrigin + performance.now());
 // MOCK — clearly labelled. Default outcome is REQUEST_VERIFICATION; ALLOW/DENY only when the
 // operator picks them to preview the result screens. Never used when USE_MOCK is false.
 // ============================================================
+const MOCK_MATCH_ID = "mock-user"; // what the mock "recognises" in identify mode
 const MOCK_CYCLE = ["CHALLENGE", "MOVE_CLOSER", "HOLD_STILL", "IMPROVE_LIGHT", "RETRY", "RECEPTION", "NONE"];
 let mockCycleIdx = 0;
 const MOCK_REASON = {
@@ -139,15 +147,15 @@ const mockApi = {
     const ms = Math.round(rand(250, 450));
     await sleep(ms);
     const o = els.mockOutcome.value;
-    if (o === "ALLOW") return { identity: "MATCH", similarity: 99.2, ms };
-    if (o === "DENY_MISMATCH") return { identity: "MISMATCH", similarity: 31.5, ms };
-    return { identity: "UNKNOWN", similarity: null, ms };
+    if (o === "ALLOW") return { identity: "MATCH", user_id: MOCK_MATCH_ID, similarity: 99.2, ms };
+    if (o === "DENY_MISMATCH") return { identity: "MISMATCH", user_id: null, similarity: 31.5, ms };
+    return { identity: "UNKNOWN", user_id: null, similarity: null, ms };
   },
   async liveness(f) {
     log("mock liveness", { attempt_id: f.attempt_id, frames: f.frames.length, capture_ts_ms: f.frames.map((x) => x.ts) });
     await sleep(rand(250, 550));
     const o = els.mockOutcome.value;
-    if (o === "ALLOW") return mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "LIVE", score: 0.94 }, { status: "MATCH", similarity: 99.2 });
+    if (o === "ALLOW") return mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "LIVE", score: 0.94 }, { status: "MATCH", similarity: 99.2, user_id: MOCK_MATCH_ID });
     if (o === "DENY_SPOOF") return mockDecision(f.attempt_id, "DENY", "SPOOF_PASSIVE", "NONE", { status: "SPOOF", score: 0.12 }, { status: "UNKNOWN", similarity: null });
     if (o === "DENY_MISMATCH") return mockDecision(f.attempt_id, "DENY", "ID_MISMATCH", "NONE", { status: "LIVE", score: 0.9 }, { status: "MISMATCH", similarity: 31.5 });
     let next = els.mockNext.value;
@@ -290,7 +298,10 @@ async function startCamera() {
       audio: false,
     });
     els.video.srcObject = stream;
+    els.video.addEventListener("loadedmetadata", fitCameraToVideo);
+    els.video.addEventListener("resize", fitCameraToVideo);
     await els.video.play().catch(() => {});
+    fitCameraToVideo();
     state.cameraReady = true;
     setCamStatus("ok", "Camera connected");
     els.camMessage.hidden = true;
@@ -299,6 +310,12 @@ async function startCamera() {
     cameraFailed(err?.name === "NotAllowedError" ? "Camera permission was denied." : "No camera was found.");
   }
   updateVerifyEnabled();
+}
+
+/** Make the preview frame the camera's real shape (e.g. 4:3), so there are no black bars and no cropping. */
+function fitCameraToVideo() {
+  const w = els.video.videoWidth, h = els.video.videoHeight;
+  if (w && h) document.documentElement.style.setProperty("--cam-ar", String(w / h));
 }
 
 function cameraFailed(detail) {
@@ -566,7 +583,7 @@ async function renderResult(d, flow, phase) {
   updateVerifyEnabled();
 
   els.resultCard.className = `result ${kind}`;
-  els.resultUser.textContent = state.userId ? `ID ${state.userId}` : "";
+  els.resultUser.textContent = resultUserLine(d, kind);
   if (kind === "approved") {
     els.resultIcon.innerHTML = svg("check", 1.6);
     els.resultHeading.textContent = "Access Approved";
@@ -596,6 +613,7 @@ async function renderResult(d, flow, phase) {
   els.resultMock.hidden = !CONFIG.USE_MOCK;
   els.resetHint.textContent = "";
   els.timingDetail.textContent = "";
+  els.mTime.textContent = "…";   // never show a previous attempt's time; filled in on the paint frame
   setScreen("result");
 
   await nextFrame();
@@ -613,6 +631,17 @@ async function renderResult(d, flow, phase) {
   els.opTimings.textContent = els.timingDetail.textContent || "—";
 
   scheduleReset(els.continueBtn.hidden && els.retryBtn.hidden ? CONFIG.RESULT_RESET_MS : CONFIG.ACTION_RESET_MS);
+}
+
+/**
+ * 1:1 mode: the ID the person typed. Identify mode: the matched ID, shown ONLY on approval —
+ * a rejected or pending face never reveals who it most resembled.
+ */
+function resultUserLine(d, kind) {
+  if (!CONFIG.IDENTIFY_MODE) return state.userId ? `ID ${state.userId}` : "";
+  if (kind !== "approved") return "";
+  const matched = d?.signals?.identity?.user_id || d?.user_id || state.identityResult?.user_id;
+  return matched ? `ID ${matched}` : "";
 }
 
 function timingDetail(d, phase, elapsed) {
@@ -645,11 +674,14 @@ async function renderFailure(flow, err) {
   updateVerifyEnabled();
   state.challengeAvailable = false;
   els.resultCard.className = "result pending";
-  els.resultUser.textContent = state.userId ? `ID ${state.userId}` : "";
+  els.resultUser.textContent = CONFIG.IDENTIFY_MODE ? "" : (state.userId ? `ID ${state.userId}` : "");
   els.resultIcon.innerHTML = svg("shield", 1.6);
   els.resultHeading.textContent = "Additional Verification Required";
-  els.resultText.textContent = err?.status === 400
-    ? `${PENDING_TEXT} The ID was not accepted.`
+  const rejectedInput = err?.status === 400 || err?.status === 422;
+  els.resultText.textContent = rejectedInput
+    ? (CONFIG.IDENTIFY_MODE
+        ? `${PENDING_TEXT} The server does not support face-only identification yet.`
+        : `${PENDING_TEXT} The ID was not accepted.`)
     : `${PENDING_TEXT} The verification service could not be reached.`;
   els.mLiveness.textContent = "—";
   els.mSimilarity.textContent = "—";
@@ -785,14 +817,21 @@ for (const id of CONFIG.ENROLLED_IDS) {
   o.value = id;
   els.enrolledList.appendChild(o);
 }
+document.body.classList.toggle("identify", CONFIG.IDENTIFY_MODE);
+els.userId.disabled = CONFIG.IDENTIFY_MODE;
 els.idForm.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (CONFIG.IDENTIFY_MODE) return beginAttempt(null);
   const { id, error } = readUserId();
   if (error) { els.idHelp.textContent = error; els.userId.focus(); return; }
   beginAttempt(id);
 });
 els.continueBtn.addEventListener("click", runChallenge);
-els.retryBtn.addEventListener("click", () => { if (state.userId) beginAttempt(state.userId); else goHome(); });
+els.retryBtn.addEventListener("click", () => {
+  if (CONFIG.IDENTIFY_MODE) beginAttempt(null);
+  else if (state.userId) beginAttempt(state.userId);
+  else goHome();
+});
 els.homeBtn.addEventListener("click", goHome);
 
 setupOperator();
