@@ -1,6 +1,7 @@
 /* Frame encoder worker: ImageBitmap -> JPEG Blob, off the rendering thread.
  * Message in:  { id, bitmap, maxWidth, quality }   (bitmap is transferred)
  * Message out: { id, blob } or { id, error }
+ * Frames stay UNMIRRORED: only the on-screen preview is mirrored (CSS). Never flip here.
  */
 let canvas = null;
 let ctx = null;

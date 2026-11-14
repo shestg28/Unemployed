@@ -383,7 +383,11 @@ function encodeOnMainThread(source) {
   return new Promise((resolve) => c.toBlob(resolve, "image/jpeg", CONFIG.JPEG_QUALITY));
 }
 
-/** One frame: { blob, ts (epoch ms at capture), perf (performance.now() at capture) }. */
+/**
+ * One frame: { blob, ts (epoch ms at capture), perf (performance.now() at capture) }.
+ * MIRRORING RULE: only the preview is mirrored (CSS scaleX(-1) on <video>). Frames sent to the backend
+ * are UNMIRRORED: never flip the canvas or the bitmap here or in frame-worker.js.
+ */
 async function grabFrame() {
   const perf = performance.now();
   const ts = nowEpochMs();
