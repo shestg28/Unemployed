@@ -57,3 +57,7 @@ SCHEDULE_PATH = os.environ.get("SCHEDULE_PATH", str(REPO_ROOT / "data" / "schedu
 KIOSK_ZONE = os.environ.get("KIOSK_ZONE") or None   # None = don't check zone
 KIOSK_ID = os.environ.get("KIOSK_ID", "kiosk-01")
 DEMO_CLOCK_ENABLED = _flag("DEMO_CLOCK_ENABLED", True)
+
+# --- v3: offline outbox + staff ----------------------------------------------------
+OUTBOX_PATH = os.environ.get("OUTBOX_PATH", str(REPO_ROOT / "logs" / "outbox.db"))
+MAX_PIN_FAILURES = 5  # per attempt, then 429

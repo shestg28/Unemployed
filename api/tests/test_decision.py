@@ -1,4 +1,5 @@
-"""Safety tests for the decision path: (a)(b)(c) v2, (d) schedule."""
+"""Safety tests: (a)(b)(c) v2 decision path, (d) schedule, (e) offline/staff, (f) sync."""
+import hashlib
 import json
 import itertools
 
@@ -6,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import pipeline
-from api import config, identity, mode, schedule, signals
-from api.decide import decide
+from api import config, identity, mode, outbox, schedule, signals, sync_worker
+from api.decide import decide, decide_staff
 from api.main import app
 from api.store import STORE
 
@@ -44,6 +45,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SCHEDULE_PATH", str(sched))
     monkeypatch.setattr(config, "KIOSK_ZONE", "LAB-1")
     monkeypatch.setattr(mode, "current", lambda: "ONLINE")
+    monkeypatch.setattr(config, "OUTBOX_PATH", str(tmp_path / "outbox.db"))
     schedule.set_override(WED_10)  # inside the allow window
     STORE.clear()
     yield TestClient(app)
@@ -207,3 +209,111 @@ def test_d_perfect_biometrics_but_schedule_prohibited_is_deny(client, monkeypatc
     r = client.post(f"/attempt/{aid}/challenge", data={"challenge_id": ch["challenge_id"]},
                     files=[("frames", ("f.jpg", FRAME, "image/jpeg"))] * 3).json()
     assert (r["decision"], r["reason_code"]) == ("DENY", "SCHEDULE_DENIED")
+
+
+PIN = "4321"
+
+
+def _staff(c, aid, approve=True, pin=PIN, id_checked=True, reason="checked campus ID card"):
+    return c.post(f"/attempt/{aid}/staff_verify", json={
+        "operator_pin": pin, "id_checked": id_checked, "reason": reason, "approve": approve})
+
+
+def test_e_offline_never_auto_allows_and_staff_cannot_override_spoof_or_schedule(
+        client, monkeypatch):
+    perfect = {"quality": GOOD_Q, "passive": LIVE, "identity": MATCH, "challenge": None,
+               "passive_allow_enabled": True, "schedule": PERMITTED}
+    assert decide({**perfect, "mode": "OFFLINE"}) ==         ("REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY")
+    staff_ok = {"approve": True, "id_checked": True, "reason": "ID checked"}
+    assert decide_staff({"passive": {"status": "SPOOF"}, "schedule": PERMITTED,
+                         "staff": staff_ok})[0] == "DENY"
+    assert decide_staff({"passive": LIVE, "challenge_passive": {"status": "SPOOF"},
+                         "schedule": PERMITTED, "staff": staff_ok})[0] == "DENY"
+    assert decide_staff({"passive": LIVE, "schedule": {"status": "PROHIBITED"},
+                         "staff": staff_ok}) == ("DENY", "SCHEDULE_DENIED", "NONE")
+
+    monkeypatch.setenv("OPERATOR_PIN_HASH", hashlib.sha256(PIN.encode()).hexdigest())
+    monkeypatch.setattr(mode, "current", lambda: "OFFLINE")
+
+    # Offline + perfect signals -> STEP-UP, never ALLOW, until staff verifies.
+    aid = _start(client)
+    _identity(client, aid)
+    r = _liveness(client, aid).json()
+    assert (r["decision"], r["reason_code"], r["next_action"], r["mode"]) ==         ("REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY", "OFFLINE")
+    assert _staff(client, aid, pin="0000").status_code == 403
+    assert _staff(client, aid, id_checked=False).status_code == 400
+    assert _staff(client, aid, reason="  ").status_code == 400
+    r = _staff(client, aid).json()
+    assert (r["decision"], r["reason_code"]) == ("ALLOW", "STAFF_VERIFIED")
+    assert r["staff"]["method"] == "physical_id" and r["staff"]["operator_id"]
+
+    # Offline SPOOF -> DENY, and staff cannot override it.
+    monkeypatch.setattr(pipeline, "passive_liveness",
+                        lambda f: {"status": "SPOOF", "score": 0.99, "per_frame": []}, raising=False)
+    aid = _start(client)
+    assert _liveness(client, aid).json()["decision"] == "DENY"
+    assert _staff(client, aid).status_code == 409
+    assert STORE.get(aid).staff_decision is None
+
+    # PROHIBITED by the time staff decides -> DENY even with approve=true.
+    monkeypatch.setattr(pipeline, "passive_liveness", lambda f: dict(LIVE, per_frame=[]),
+                        raising=False)
+    aid = _start(client)
+    assert _liveness(client, aid).json()["next_action"] == "STAFF_VERIFY"
+    client.post("/operator/clock", json={"iso_time": WED_1230})
+    r = _staff(client, aid).json()
+    assert (r["decision"], r["reason_code"]) == ("DENY", "SCHEDULE_DENIED")
+
+    # Every decision became its own outbox event; staff events carry operator_id.
+    rows = outbox.get().unsynced()
+    assert len(rows) == 5 and sum(r["verification_method"] == "physical_id" for r in rows) == 2
+
+
+class _FakeS3:
+    """Stands in for the central store: objects keyed by S3 key."""
+    def __init__(self):
+        self.objects, self.puts, self.fail_next = {}, 0, False
+
+    def head_bucket(self, Bucket):
+        return {}
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        self.puts += 1
+        if self.fail_next:
+            self.fail_next = False
+            return {"ResponseMetadata": {"HTTPStatusCode": 500}}
+        self.objects[Key] = json.loads(Body)
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+
+def test_f_sync_is_idempotent_and_outbox_survives_reopen(tmp_path):
+    db = tmp_path / "outbox.db"
+    box = outbox.Outbox(db)
+    eid = box.add(attempt_id="a1", user_id="u1", decision="ALLOW", reason_code="OK_LIVE_MATCH",
+                  policy_version="t1", verification_method="face")
+    fake = _FakeS3()
+    up = sync_worker.S3Uploader(client=fake, bucket="test-bucket")
+
+    fake.fail_next = True  # non-200 -> stays pending
+    assert sync_worker.sync_once(box, up) == {"sent": 0, "failed": 1}
+    assert box.counts() == (1, 0)
+    assert sync_worker.sync_once(box, up) == {"sent": 1, "failed": 0}
+
+    # Lost ack: the same event is sent again -> still ONE central record.
+    box._db.execute("UPDATE events SET synced=0 WHERE event_id=?", (eid,))
+    assert sync_worker.sync_once(box, up)["sent"] == 1
+    assert fake.puts == 3 and list(fake.objects) == [f"events/{eid}.json"]
+    record = fake.objects[f"events/{eid}.json"]
+    assert set(record) == set(outbox.COLUMNS) - {"synced"}
+    assert "u1" not in json.dumps(record) and record["decision"] == "ALLOW"
+
+    # Survives restart: reopen the file, same rows, flags and pseudonym salt.
+    pseudonym = box.pseudonym("u1")
+    box.add(attempt_id="a2", user_id="u1", decision="DENY", reason_code="SPOOF_PASSIVE",
+            policy_version="t1", verification_method="face")
+    box.close()
+    box2 = outbox.Outbox(db)
+    assert box2.counts() == (1, 1)
+    assert box2.get(eid)["synced"] == 1
+    assert box2.pseudonym("u1") == pseudonym
+    box2.close()

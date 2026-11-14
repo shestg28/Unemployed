@@ -153,6 +153,27 @@ def decide(signals: dict) -> Decision:
     return REQUEST, "SCHEDULE_UNKNOWN", "STAFF_VERIFY"
 
 
+def decide_staff(signals: dict) -> Decision:
+    """Staff decision after a physical ID check. Pure.
+
+    signals = {"passive": first-pass passive, "challenge_passive": ... | None,
+               "schedule": evaluated NOW, "staff": {"approve", "id_checked", "reason"}}
+    Staff can never override SPOOF or a PROHIBITED schedule.
+    """
+    if not isinstance(signals, dict):
+        return REQUEST, "MANUAL_REVIEW", "STAFF_VERIFY"
+    if "SPOOF" in (_status(signals.get("passive")), _status(signals.get("challenge_passive"))):
+        return DENY, "SPOOF_PASSIVE", "NONE"
+    if _status(signals.get("schedule")) == "PROHIBITED":
+        return DENY, "SCHEDULE_DENIED", "NONE"
+    staff = signals.get("staff") if isinstance(signals.get("staff"), dict) else {}
+    if staff.get("id_checked") is not True or not str(staff.get("reason") or "").strip():
+        return REQUEST, "MANUAL_REVIEW", "STAFF_VERIFY"
+    if staff.get("approve") is True:
+        return ALLOW, "STAFF_VERIFIED", "NONE"
+    return DENY, "STAFF_REJECTED", "NONE"
+
+
 MESSAGES = {
     "OK_LIVE_MATCH": "Welcome.",
     "SPOOF_PASSIVE": "Entry denied.",

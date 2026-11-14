@@ -4,7 +4,11 @@ Run from the repo root:  uvicorn api.main:app --port 8000
 
 Nothing in the decision path calls pipeline.liveness.fuse() or motion.py.
 """
+import asyncio
+import hashlib
+import hmac
 import logging
+import os
 import random
 import time
 import uuid
@@ -14,9 +18,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from . import config, identity, mode, schedule, signals
+from . import config, identity, mode, outbox, schedule, signals, sync_worker
 from .attempt_log import late_result, write_decision
-from .decide import decide, message_for
+from .decide import decide, decide_staff, message_for
 from .store import STORE, Attempt, identity_snapshot, now_ms
 
 log = logging.getLogger("api")
@@ -33,7 +37,13 @@ async def lifespan(app: FastAPI):
     stubs = signals.stubs_in_use()
     if stubs:
         log.warning("STUB pipeline functions in use (never ALLOW): %s", stubs)
+    outbox.get()                               # open/create logs/outbox.db
+    await asyncio.to_thread(mode.refresh)      # first health check
+    stop = asyncio.Event()
+    task = asyncio.create_task(sync_worker.run_forever(stop))
     yield
+    stop.set()
+    await task
 
 
 app = FastAPI(title="HID liveness", lifespan=lifespan)
@@ -62,6 +72,21 @@ def _parse_ts(values: list[str] | None, n: int) -> list[int]:
                 except ValueError:
                     raise HTTPException(400, "capture_ts_ms must be integers")
     return (out + [0] * n)[:n]
+
+
+OFFLINE_IDENTITY = {"identity": "UNKNOWN", "similarity": None, "ms": 0, "note": "offline"}
+
+
+def _emit(attempt_id: str, user_id: str, d, sig: dict, method: str,
+          operator_id: str | None = None) -> None:
+    """Queue one decision event for sync. Never breaks the decision path."""
+    try:
+        outbox.get().add(attempt_id=attempt_id, user_id=user_id, decision=d[0],
+                         reason_code=d[1],
+                         policy_version=(sig.get("schedule") or {}).get("policy_version"),
+                         verification_method=method, operator_id=operator_id)
+    except Exception:
+        log.exception("outbox write failed for attempt %s", attempt_id)
 
 
 def _get_attempt(attempt_id: str) -> Attempt:
@@ -179,7 +204,8 @@ def attempt_identity(attempt_id: str, frame: UploadFile = File(...),
     at = _get_attempt(attempt_id)
     data = _read_frames([frame])
     try:
-        res = identity.compare(at.user_id, data[0])
+        res = (dict(OFFLINE_IDENTITY) if mode.current() == "OFFLINE"
+               else identity.compare(at.user_id, data[0]))
     finally:
         data.clear()
     outcome = STORE.record_identity(attempt_id, res)
@@ -219,7 +245,8 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
         data.clear()  # kiosk keeps nothing
 
     t_wait = time.perf_counter()
-    at.identity_event.wait(timeout=max(at.deadline_mono - time.monotonic(), 0.0))
+    if mode.current() == "ONLINE":  # offline: no identity is coming
+        at.identity_event.wait(timeout=max(at.deadline_mono - time.monotonic(), 0.0))
     stage["identity_wait"] = int((time.perf_counter() - t_wait) * 1000)
 
     with at.lock:
@@ -239,6 +266,7 @@ def attempt_liveness(attempt_id: str, frames: list[UploadFile] = File(...),
     if resp is mine:  # only the request that actually decided logs it
         _log(at.attempt_id, at.user_id, scenario, "first_pass", d, q, p, ident, stage,
              first_ms, first_ms, labels=_labels_result(labels_fut), sig=sig)
+        _emit(at.attempt_id, at.user_id, d, sig, "face")
     return resp
 
 
@@ -302,13 +330,14 @@ def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
         # Re-run identity on one good frame of the same tracked face, in
         # parallel with the challenge check. No such frame -> no call -> UNKNOWN.
         good = _good_tracked_frame(q, len(data))
+        offline = mode.current() == "OFFLINE"
         id_fut = (_EXECUTOR.submit(identity.compare, at.user_id, data[good])
-                  if good is not None else None)
+                  if good is not None and not offline else None)
         ch = signals.challenge_check(data, ts, prompt_ts, at.challenge["actions"])
         t_c = time.perf_counter()
     finally:
         data.clear()
-    ch_ident = _challenge_identity(id_fut)
+    ch_ident = dict(OFFLINE_IDENTITY) if offline else _challenge_identity(id_fut)
     t_id = time.perf_counter()
     challenge = {"status": ch.get("status"), "passive": ch.get("passive"),
                  "timed_out": timed_out,
@@ -331,10 +360,92 @@ def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
         resp["total_ms"] = total_ms
         mine = resp
         resp = at.set_challenge_decision(mine)
+        if resp is mine:
+            at.challenge_passive = ch.get("passive")
     if resp is mine:
         _log(at.attempt_id, at.user_id, at.scenario, "challenge", d, q, ch.get("passive"),
              ident, stage, first_ms, total_ms, challenge=challenge, sig=sig)
+        _emit(at.attempt_id, at.user_id, d, sig, "face+challenge")
     return resp
+
+
+# --- v3: staff verification (physical ID), works online and offline ---------------------
+
+class StaffBody(BaseModel):
+    operator_pin: str
+    id_checked: bool
+    reason: str
+    approve: bool
+
+
+def _operator_id(pin_hash: str) -> str:
+    return os.environ.get("OPERATOR_ID") or f"op-{pin_hash[:8]}"
+
+
+@app.post("/attempt/{attempt_id}/staff_verify")
+def staff_verify(attempt_id: str, body: StaffBody) -> dict:
+    at = _get_attempt(attempt_id)
+    expected = (os.environ.get("OPERATOR_PIN_HASH") or "").strip().lower()
+    if not expected:
+        raise HTTPException(503, "staff verification not configured (OPERATOR_PIN_HASH)")
+    with at.lock:
+        if at.pin_failures >= config.MAX_PIN_FAILURES:
+            raise HTTPException(429, "too many wrong PINs for this attempt")
+        given = hashlib.sha256(body.operator_pin.encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(given, expected):
+            at.pin_failures += 1
+            raise HTTPException(403, "wrong operator PIN")
+    if body.id_checked is not True:
+        raise HTTPException(400, "physical ID must be checked (id_checked=true)")
+    reason = (body.reason or "").strip()
+    if not reason or len(reason) > 200:
+        raise HTTPException(400, "reason required (1-200 chars)")
+
+    with at.lock:
+        if at.staff_decision is not None:
+            return at.staff_decision
+        latest = at.challenge_decision or at.decision
+        if latest is None:
+            raise HTTPException(409, "no decision yet for this attempt")
+        if latest["decision"] != "REQUEST_VERIFICATION":
+            # ALLOW needs nothing; DENY (spoof, mismatch, schedule) is final.
+            raise HTTPException(409, "blocked: attempt is %s (%s); staff cannot override"
+                                % (latest["decision"], latest["reason_code"]))
+        sig = {"passive": at.passive, "challenge_passive": at.challenge_passive,
+               "schedule": schedule.evaluate(at.user_id, config.KIOSK_ZONE),
+               "mode": mode.current(),
+               "staff": {"approve": body.approve, "id_checked": body.id_checked,
+                         "reason": reason}}
+        d = decide_staff(sig)
+        op = _operator_id(expected)
+        total_ms = now_ms() - at.server_t0_ms
+        mine = {
+            "decision": d[0], "reason_code": d[1], "message": message_for(d[1], d[2]),
+            "next_action": d[2], "attempt_id": at.attempt_id,
+            "schedule": _schedule_view(sig), "mode": sig["mode"],
+            "staff": {"operator_id": op, "method": "physical_id", "reason": reason},
+            "first_pass_server_ms": (at.decision or {}).get("first_pass_server_ms"),
+            "total_ms": total_ms,
+        }
+        at.staff_decision = mine
+    write_decision({"attempt_id": at.attempt_id, "user_id": at.user_id,
+                    "scenario": at.scenario, "phase": "staff", "decision": d[0],
+                    "reason": d[1], "next_action": d[2],
+                    "schedule": {**_schedule_view(sig), "note": sig["schedule"].get("note")},
+                    "mode": sig["mode"], "demo_clock": schedule.override_active(),
+                    "staff": mine["staff"], "first_pass_ms": mine["first_pass_server_ms"],
+                    "total_ms": total_ms})
+    _emit(at.attempt_id, at.user_id, d, sig, "physical_id", operator_id=op)
+    return mine
+
+
+@app.get("/status")
+def status() -> dict:
+    pending, synced = outbox.get().counts()
+    return {"mode": mode.current(), "pending_sync": pending, "synced": synced,
+            "policy_version": schedule.policy_version(),
+            "kiosk_time": schedule.now().isoformat(timespec="seconds"),
+            "demo_clock": schedule.override_active()}
 
 
 # --- v3: operator demo clock ---------------------------------------------------------
@@ -391,14 +502,18 @@ def verify(frames: list[UploadFile] = File(...), user_id: str = Form(...)) -> di
     attempt_id = str(uuid.uuid4())
     try:
         mid = data[len(data) // 2]
-        id_fut = _EXECUTOR.submit(identity.compare, user_id, mid)
+        id_fut = (None if mode.current() == "OFFLINE"
+                  else _EXECUTOR.submit(identity.compare, user_id, mid))
         labels_fut = _labels_future(mid)
         q, p, stage = _quality_and_passive(data, [0] * len(data))
         t_wait = time.perf_counter()
         remaining = config.ATTEMPT_DEADLINE_MS / 1000 - (t_wait - t0)
-        wait([id_fut], timeout=max(remaining, 0.0))
+        if id_fut is None:
+            ident = dict(OFFLINE_IDENTITY)
+        else:
+            wait([id_fut], timeout=max(remaining, 0.0))
+            ident = id_fut.result(timeout=0) if id_fut.done() else None  # late -> missing
         stage["identity_wait"] = int((time.perf_counter() - t_wait) * 1000)
-        ident = id_fut.result(timeout=0) if id_fut.done() else None  # late -> missing
     finally:
         data.clear()  # kiosk keeps nothing
     t_dec = time.perf_counter()
@@ -411,6 +526,7 @@ def verify(frames: list[UploadFile] = File(...), user_id: str = Form(...)) -> di
     labels = _labels_result(labels_fut)
     _log(attempt_id, user_id, "verify_v1", "first_pass", d, q, p, ident, stage,
          decision_ms, decision_ms, labels=labels, sig=sig)
+    _emit(attempt_id, user_id, d, sig, "face")
     return {
         "decision": d[0],
         "confidence": _v1_confidence(d, p, sim),
