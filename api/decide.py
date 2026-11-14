@@ -12,7 +12,10 @@ signals = {
                # None = no result arrived before the deadline
   "challenge": None (first pass) |
                {"status": "PASS"|"FAIL"|"UNCERTAIN"|"UNAVAILABLE",
-                "passive": {"status", "score"} | None, "timed_out": bool},
+                "passive": {"status", "score"} | None, "timed_out": bool,
+                "identity": {"status", "similarity"} | None},
+               # challenge.identity = CompareFaces re-run on a good challenge
+               # frame. In the challenge phase it REPLACES top-level identity.
   "passive_allow_enabled": bool,
 }
 """
@@ -67,8 +70,9 @@ def _deny(signals: dict) -> Decision | None:
     ch = signals.get("challenge")
     if isinstance(ch, dict) and _status(ch.get("passive")) == "SPOOF":
         return DENY, "SPOOF_PASSIVE", "NONE"
-    if (_status(signals.get("identity")) == "MISMATCH"
-            and _quality_ok(signals.get("quality"))):
+    # Identity in force: the challenge-frame result once a challenge ran.
+    ident = ch.get("identity") if isinstance(ch, dict) else signals.get("identity")
+    if _status(ident) == "MISMATCH" and _quality_ok(signals.get("quality")):
         return DENY, "ID_MISMATCH", "NONE"
     return None
 
@@ -105,9 +109,10 @@ def _after_challenge(signals: dict) -> Decision:
         return REQUEST, "TIMEOUT", "RECEPTION"
     if _status(ch) == "FAIL":
         return REQUEST, "CHALLENGE_FAILED", "RECEPTION"
+    if _status(ch.get("identity")) != "MATCH":  # UNKNOWN / missing
+        return REQUEST, "ID_UNAVAILABLE", "RECEPTION"
     if (_status(ch) == "PASS"
             and _status(ch.get("passive")) == "LIVE"
-            and _status(signals.get("identity")) == "MATCH"
             and _quality_ok(q) and _continuity_ok(q)):
         return ALLOW, "OK_LIVE_MATCH", "NONE"
     return REQUEST, "MANUAL_REVIEW", "RECEPTION"

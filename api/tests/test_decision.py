@@ -69,9 +69,25 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     for ch_status, ch_passive in itertools.product(
             ["PASS", "FAIL", "UNCERTAIN", "UNAVAILABLE", None], [LIVE, None, {"status": "UNAVAILABLE"}]):
         d = decide({"quality": GOOD_Q, "passive": {"status": "UNCERTAIN"}, "identity": MATCH,
-                    "challenge": {"status": ch_status, "passive": ch_passive, "timed_out": False},
+                    "challenge": {"status": ch_status, "passive": ch_passive, "timed_out": False,
+                                  "identity": MATCH},
                     "passive_allow_enabled": True})
         assert (d[0] == "ALLOW") == (ch_status == "PASS" and ch_passive is LIVE), d
+
+    # Challenge phase uses the challenge-frame identity, not the first-pass one
+    # (which may have been late/missing): MATCH -> ALLOW, UNKNOWN/missing ->
+    # RECEPTION, MISMATCH on good quality -> DENY.
+    def _after(ch_ident):
+        return decide({"quality": GOOD_Q, "passive": {"status": "UNCERTAIN"}, "identity": None,
+                       "passive_allow_enabled": False,
+                       "challenge": {"status": "PASS", "passive": LIVE, "timed_out": False,
+                                     "identity": ch_ident}})
+    assert [_after(i) for i in (MATCH, {"status": "UNKNOWN"}, None,
+                                {"status": "MISMATCH", "similarity": 10.0})] == [
+        ("ALLOW", "OK_LIVE_MATCH", "NONE"),
+        ("REQUEST_VERIFICATION", "ID_UNAVAILABLE", "RECEPTION"),
+        ("REQUEST_VERIFICATION", "ID_UNAVAILABLE", "RECEPTION"),
+        ("DENY", "ID_MISMATCH", "NONE")]
 
     # The real STUBs (pipeline has no v2 functions yet) can never produce ALLOW.
     d = decide({"quality": signals._stub_quality([]), "passive": signals._stub_passive([]),
@@ -79,7 +95,8 @@ def test_a_missing_unknown_or_unavailable_signal_never_allows():
     assert d[0] != "ALLOW"
     ch = signals._stub_challenge([], [], 0, [])
     d = decide({"quality": GOOD_Q, "passive": LIVE, "identity": MATCH,
-                "challenge": {"status": ch["status"], "passive": ch["passive"], "timed_out": False},
+                "challenge": {"status": ch["status"], "passive": ch["passive"], "timed_out": False,
+                              "identity": MATCH},
                 "passive_allow_enabled": True})
     assert d == ("REQUEST_VERIFICATION", "MANUAL_REVIEW", "RECEPTION")
 

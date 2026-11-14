@@ -22,6 +22,7 @@ from .store import STORE, Attempt, identity_snapshot, now_ms
 log = logging.getLogger("api")
 _EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="api")
 CHALLENGE_UPLOAD_GRACE_MS = 2000
+CHALLENGE_IDENTITY_TIMEOUT_S = 2.0
 
 
 @asynccontextmanager
@@ -244,6 +245,27 @@ def challenge_start(attempt_id: str) -> dict:
             "timeout_ms": config.CHALLENGE_TIMEOUT_MS}
 
 
+def _good_tracked_frame(q: dict | None, n: int) -> int | None:
+    """Index of the best good frame, only if quality vouches it's one tracked face."""
+    if not (isinstance(q, dict) and q.get("ok") is True and q.get("continuity_ok") is True):
+        return None
+    per = q.get("per_frame") or []
+    good = [(f.get("face_px") or 0, i) for i, f in enumerate(per[:n])
+            if isinstance(f, dict) and f.get("ok") is True and f.get("face_count") in (None, 1)]
+    return max(good)[1] if good else None
+
+
+def _challenge_identity(fut) -> dict:
+    if fut is None:
+        return {"identity": "UNKNOWN", "similarity": None, "ms": 0,
+                "note": "no_good_tracked_frame"}
+    try:
+        return fut.result(timeout=CHALLENGE_IDENTITY_TIMEOUT_S)
+    except Exception as e:  # timeout or failure -> never a pass
+        return {"identity": "UNKNOWN", "similarity": None, "ms": None,
+                "note": f"error:{type(e).__name__}"}
+
+
 @app.post("/attempt/{attempt_id}/challenge")
 def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
                      capture_ts_ms: list[str] | None = Form(None),
@@ -263,20 +285,30 @@ def challenge_submit(attempt_id: str, frames: list[UploadFile] = File(...),
         t = time.perf_counter()
         q = signals.quality(data)
         t_q = time.perf_counter()
+        # Re-run identity on one good frame of the same tracked face, in
+        # parallel with the challenge check. No such frame -> no call -> UNKNOWN.
+        good = _good_tracked_frame(q, len(data))
+        id_fut = (_EXECUTOR.submit(identity.compare, at.user_id, data[good])
+                  if good is not None else None)
         ch = signals.challenge_check(data, ts, prompt_ts, at.challenge["actions"])
         t_c = time.perf_counter()
     finally:
         data.clear()
+    ch_ident = _challenge_identity(id_fut)
+    t_id = time.perf_counter()
     challenge = {"status": ch.get("status"), "passive": ch.get("passive"),
-                 "timed_out": timed_out}
+                 "timed_out": timed_out,
+                 "identity": {"status": ch_ident["identity"],
+                              "similarity": ch_ident["similarity"]}}
     with at.lock:
         if at.challenge_decision is not None:
             return at.challenge_decision
-        ident = identity_snapshot(at)
+        ident = ch_ident  # challenge-frame identity replaces the first-pass one
         t_dec = time.perf_counter()
-        d = decide(_decision_signals(q, at.passive, ident, challenge))
+        d = decide(_decision_signals(q, at.passive, None, challenge))
         stage = {"quality": int((t_q - t) * 1000), "passive": int((t_c - t_q) * 1000),
-                 "identity_wait": 0, "decide": int((time.perf_counter() - t_dec) * 1000)}
+                 "identity_wait": int((t_id - t_c) * 1000),
+                 "decide": int((time.perf_counter() - t_dec) * 1000)}
         first_ms = at.decision["first_pass_server_ms"]
         total_ms = now_ms() - at.server_t0_ms
         resp = _first_pass_response(at, d, q, (ch.get("passive") or {}), ident, stage, first_ms)
