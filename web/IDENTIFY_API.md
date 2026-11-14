@@ -1,8 +1,8 @@
 # Request: face-only identification (1:N) — for Akash (/api owner)
 
-The kiosk now verifies **without an ID**: the person just looks at the camera and presses Verify.
-That needs one backend change. The kiosk side is done and is on `shesh/kiosk` (`CONFIG.IDENTIFY_MODE`, default on;
-`?identify=0` brings back the ID field and today's 1:1 flow).
+The kiosk can verify **without an ID**: the person just looks at the camera and presses Verify.
+That needs one backend change. The kiosk side is done on `shesh/kiosk` (`CONFIG.IDENTIFY_MODE`, **off by default**
+until this lands; `?identify=1` turns it on, otherwise the kiosk uses the 1:1 flow with the ID field).
 
 Today `/attempt/start` rejects a missing `user_id` (400 `invalid user_id`), so identify mode shows
 "Additional Verification Required — the server does not support face-only identification yet" until this lands.

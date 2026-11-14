@@ -23,10 +23,9 @@ const CONFIG = {
   // "" = same origin (use web/serve.py to proxy the API). URL override: ?api=http://host:8000
   API_BASE: params.get("api") || "",
 
-  // Face-only identification: no ID field; the server matches the face against every enrolled photo (1:N).
-  // Needs the backend to accept /attempt/start without user_id (see web/IDENTIFY_API.md).
-  // false = 1:1 mode with the ID field. URL override: ?identify=0 / ?identify=1
-  IDENTIFY_MODE: params.has("identify") ? params.get("identify") !== "0" : true,
+  // Face-only identification (1:N): no ID field. The v4 backend still REQUIRES user_id, so this is
+  // off by default (1:1 mode with the ID field). See web/IDENTIFY_API.md. URL override: ?identify=1
+  IDENTIFY_MODE: params.has("identify") ? params.get("identify") !== "0" : false,
 
   // Optional suggestions for the ID field in 1:1 mode (ids only, no names shown). Empty = free text.
   ENROLLED_IDS: [],
@@ -34,9 +33,12 @@ const CONFIG = {
 
   FRAME_MAX_WIDTH: 640,
   JPEG_QUALITY: 0.85,
-  LIVENESS_FRAMES: 6,          // includes the first (identity) frame
-  LIVENESS_SPACING_MS: 170,
-  FIRST_PASS_DEADLINE_MS: 2000, // HID requirement; measured from the first captured frame
+  // CONTRACT v4 first pass: recording starts at the tap (before the prompt), 14 frames at 10 fps,
+  // the quick action from /attempt/start is shown once >= BASELINE_FRAMES are captured.
+  LIVENESS_FRAMES: 14,         // includes the first (identity) frame; server max 16
+  LIVENESS_FPS: 10,
+  BASELINE_FRAMES: 3,          // frames captured before the prompt appears (server needs >= 2)
+  FIRST_PASS_DEADLINE_MS: Number(params.get("deadline")) || 2000, // HID requirement; from the first captured frame
   CHALLENGE_FPS: 5,
   CHALLENGE_BASELINE_MS: 400,
   CHALLENGE_ACTION_MS: 1500,
@@ -70,10 +72,11 @@ const realApi = {
       ["capture_ts_ms", frame.ts],
     ]),
 
-  liveness: ({ attempt_id, frames }) =>
+  liveness: ({ attempt_id, frames, prompt_ts }) =>
     postForm(`/attempt/${enc(attempt_id)}/liveness`, [
       ...frames.map((f, i) => ["frames", f.blob, `frame_${i}.jpg`]),
       ...frames.map((f) => ["capture_ts_ms", f.ts]),
+      ["prompt_ts_ms", prompt_ts],
     ]),
 
   challengeStart: ({ attempt_id }) => postForm(`/attempt/${enc(attempt_id)}/challenge/start`, []),
@@ -143,7 +146,8 @@ const mockApi = {
     log("mock start", { ...f, scenario: state.scenario });
     await sleep(rand(40, 90));
     const t0 = Date.now();
-    return { attempt_id: "mock-" + uuid(), server_t0_ms: t0, deadline_ms: t0 + 1700 };
+    return { attempt_id: "mock-" + uuid(), server_t0_ms: t0, deadline_ms: t0 + 1800,
+             action: Math.random() < 0.5 ? "SMILE" : "OPEN_MOUTH" };
   },
   async identity(f) {
     log("mock identity", { attempt_id: f.attempt_id, capture_ts_ms: f.frame.ts, bytes: f.frame.blob.size });
@@ -155,13 +159,17 @@ const mockApi = {
     return { identity: "UNKNOWN", user_id: null, similarity: null, ms };
   },
   async liveness(f) {
-    log("mock liveness", { attempt_id: f.attempt_id, frames: f.frames.length, capture_ts_ms: f.frames.map((x) => x.ts) });
-    await sleep(rand(250, 550));
+    log("mock liveness", { attempt_id: f.attempt_id, frames: f.frames.length, capture_ts_ms: f.frames.map((x) => x.ts), prompt_ts_ms: f.prompt_ts });
+    await sleep(rand(200, 400));
     const o = els.mockOutcome.value;
+    const quick = (status) => ({ action: "SMILE", status, reason: "MOCK" });
+    const withQuick = (d, status) => { d.signals.challenge = quick(status); return d; };
     if (els.mockMode.value === "OFFLINE") return mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "OFFLINE_STAFF_REQUIRED", "STAFF_VERIFY", { status: "UNCERTAIN", score: 0.55 }, { status: "UNKNOWN", similarity: null });
     if (els.mockCampus.value === "PROHIBITED") return mockDecision(f.attempt_id, "DENY", "SCHEDULE_DENIED", "NONE", { status: "UNCERTAIN", score: 0.6 }, { status: "MATCH", similarity: 99.2 });
-    // Like the server: the first pass never allows; a clean pass asks for the challenge.
-    if (o === "ALLOW") return mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "LIVENESS_UNCERTAIN", "CHALLENGE", { status: "UNCERTAIN", score: 0.62 }, { status: "MATCH", similarity: 99.2 });
+    // v4: first-pass ALLOW = identity MATCH + quick action PASS + campus PERMITTED + ONLINE.
+    if (o === "ALLOW" && els.mockCampus.value === "PERMITTED") return withQuick(mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "UNCERTAIN", score: 0.62 }, { status: "MATCH", similarity: 99.2, user_id: MOCK_MATCH_ID }), "PASS");
+    if (o === "ALLOW") return withQuick(mockDecision(f.attempt_id, "REQUEST_VERIFICATION", els.mockCampus.value === "APPROVAL_REQUIRED" ? "SCHEDULE_APPROVAL_REQUIRED" : "SCHEDULE_UNKNOWN", "STAFF_VERIFY", { status: "UNCERTAIN", score: 0.62 }, { status: "MATCH", similarity: 99.2 }), "PASS");
+    if (o === "STEPUP_ALLOW") return withQuick(mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "CHALLENGE_FAILED", "CHALLENGE", { status: "UNCERTAIN", score: 0.6 }, { status: "MATCH", similarity: 99.2 }), "FAIL");
     if (o === "DENY_SPOOF") return mockDecision(f.attempt_id, "DENY", "SPOOF_PASSIVE", "NONE", { status: "SPOOF", score: 0.12 }, { status: "UNKNOWN", similarity: null });
     if (o === "DENY_MISMATCH") return mockDecision(f.attempt_id, "DENY", "ID_MISMATCH", "NONE", { status: "LIVE", score: 0.9 }, { status: "MISMATCH", similarity: 31.5 });
     let next = els.mockNext.value;
@@ -171,7 +179,8 @@ const mockApi = {
   async challengeStart(f) {
     log("mock challenge/start", f);
     await sleep(rand(60, 120));
-    const actions = shuffle(["SMILE", "OPEN_MOUTH", "TURN_LEFT", "TURN_RIGHT"]).slice(0, 2);
+    // v4 step-up: one pose + one expression, random order
+    const actions = shuffle([shuffle(["TURN_LEFT", "TURN_RIGHT"])[0], shuffle(["SMILE", "OPEN_MOUTH"])[0]]);
     return { challenge_id: "mockc-" + uuid(), actions, baseline_ms: 400, timeout_ms: 5000 };
   },
   async challenge(f) {
@@ -179,15 +188,20 @@ const mockApi = {
     await sleep(rand(300, 600));
     const id = { status: "MATCH", similarity: 99.1, user_id: MOCK_MATCH_ID };
     let d;
-    if (els.mockOutcome.value !== "ALLOW") d = mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "CHALLENGE_FAILED", "RECEPTION", { status: "UNCERTAIN", score: 0.5 }, { status: "UNKNOWN", similarity: null });
+    if (els.mockOutcome.value !== "STEPUP_ALLOW") d = mockDecision(f.attempt_id, "REQUEST_VERIFICATION", "CHALLENGE_FAILED", "RECEPTION", { status: "UNCERTAIN", score: 0.5 }, { status: "UNKNOWN", similarity: null });
     else if (els.mockCampus.value === "PERMITTED") d = mockDecision(f.attempt_id, "ALLOW", "OK_LIVE_MATCH", "NONE", { status: "UNCERTAIN", score: 0.64 }, id);
     else d = mockDecision(f.attempt_id, "REQUEST_VERIFICATION", els.mockCampus.value === "APPROVAL_REQUIRED" ? "SCHEDULE_APPROVAL_REQUIRED" : "SCHEDULE_UNKNOWN", "STAFF_VERIFY", { status: "UNCERTAIN", score: 0.64 }, id);
     return { ...d, total_ms: 0 };
   },
   async status() {
     await sleep(rand(20, 60));
-    return { mode: els.mockMode.value, pending_sync: els.mockMode.value === "OFFLINE" ? 3 : 0, synced: 12,
-             policy_version: "MOCK-2026-11-14.1", kiosk_time: new Date().toISOString().slice(0, 19), demo_clock: false };
+    const off = els.mockMode.value === "OFFLINE", pending = off ? 3 : 0;
+    return { mode: els.mockMode.value, pending_sync: pending, synced: 12,
+             policy_version: "MOCK-2026-11-14.1", kiosk_time: new Date().toISOString().slice(0, 19), demo_clock: false,
+             passive_allow: "DISABLED: calibration gate failed (6/10 genuine)", challenge: "REQUIRED",
+             identity_service: off ? "unavailable" : "available",
+             policy: { status: "current", version: "MOCK-2026-11-14.1", expires_utc: "2026-12-31T00:00:00Z" },
+             audit_queue: { pending, synced: 12 } };
   },
 };
 
@@ -311,6 +325,7 @@ const state = {
   stopwatchRaf: 0,
   resetTimer: 0,
   resetTick: 0,
+  lastCapture: null,
   statusTimer: 0,
   statusSeq: 0,
 };
@@ -455,9 +470,23 @@ async function beginAttempt(userId) {
   els.verifyBtn.disabled = true;
 
   try {
-    // Attempt start and first capture run concurrently.
+    // v4: recording starts at the tap, BEFORE the prompt, at 10 fps. /attempt/start runs concurrently
+    // and returns the quick action; it is shown once >= BASELINE_FRAMES frames exist (baseline).
+    // Frames are encoded off-thread and collected as promises so encoding never slows the 10 fps clock.
     const startP = api.startAttempt({ user_id: userId });
-    const first = await grabFrame();
+    const interval = 1000 / CONFIG.LIVENESS_FPS;
+    const firstP = grabFrame();
+    const framePs = [firstP];
+    const tap = performance.now();
+    const recorder = (async () => {
+      for (let i = 1; i < CONFIG.LIVENESS_FRAMES; i++) {
+        await sleepUntil(tap + i * interval);
+        if (flow !== state.flow) return;
+        framePs.push(grabFrame());
+      }
+    })();
+
+    const first = await firstP;
     guard(flow);
     state.t0 = first.perf;          // timing starts at the first captured frame
     startStopwatch();
@@ -478,16 +507,30 @@ async function beginAttempt(userId) {
       .then((r) => { if (flow === state.flow) state.identityResult = { ...r, rtt_ms: Math.round(performance.now() - idSent) }; })
       .catch((e) => log("identity request failed", e));
 
-    // Liveness frames: first + 5 more, ~170ms apart from the first capture.
-    let frames = [first];
-    for (let i = 1; i < CONFIG.LIVENESS_FRAMES; i++) {
-      await sleepUntil(first.perf + i * CONFIG.LIVENESS_SPACING_MS);
+    // Quick action prompt, after the baseline frames (capture_ts of >= 2 frames < prompt_ts).
+    let prompt_ts = null;
+    const action = start?.action;
+    if (action) {
+      await sleepUntil(tap + (CONFIG.BASELINE_FRAMES - 1) * interval + 20);
       guard(flow);
-      frames.push(await grabFrame());
+      const ui = ACTION_UI[action] || { word: humanize(action), icon: "eye" };
+      els.promptIcon.innerHTML = svg(ui.icon, 2);
+      els.promptWord.textContent = ui.word;
+      els.prompt.hidden = false;
+      prompt_ts = nowEpochMs();
     }
 
+    await recorder;
+    guard(flow);
+    let frames = await Promise.all(framePs);
+    guard(flow);
+    els.prompt.hidden = true;
+    state.lastCapture = { frames: frames.length, before_prompt: prompt_ts == null ? null : frames.filter((f) => f.ts < prompt_ts).length,
+                          span_ms: frames[frames.length - 1].ts - frames[0].ts, action: action || null };
+    log("first-pass capture", state.lastCapture);
+
     // Race the server against the 2.00 s deadline (from the first frame).
-    const livenessP = api.liveness({ attempt_id: attemptId, frames });
+    const livenessP = api.liveness({ attempt_id: attemptId, frames, prompt_ts });
     frames = null;
     const deadline = sleepUntil(state.t0 + CONFIG.FIRST_PASS_DEADLINE_MS).then(() => DEADLINE);
     const winner = await Promise.race([livenessP, deadline]);
@@ -598,7 +641,9 @@ function classify(d) {
   const match = s.identity?.status === "MATCH";
   const campusOk = d?.schedule?.status === "PERMITTED";
   if (d?.decision === "ALLOW") {
-    if (d.reason_code === "OK_LIVE_MATCH" && match && campusOk && d.mode !== "OFFLINE") return "approved";
+    // First pass (v4) also returns signals.challenge; when present it must be PASS.
+    const quickOk = !s.challenge || s.challenge.status === "PASS";
+    if (d.reason_code === "OK_LIVE_MATCH" && match && campusOk && quickOk && d.mode !== "OFFLINE") return "approved";
     if (d.reason_code === "STAFF_VERIFIED") return "approved";
     log("ALLOW without the backing signals \u2014 shown as pending", d);
     return "pending";
@@ -698,6 +743,9 @@ function timingDetail(d, phase, elapsed) {
   }
   const idr = state.identityResult;
   if (phase === "first" && idr?.ms != null) parts.push(`Rekognition ${idr.ms} ms`);
+  const cap = state.lastCapture;
+  if (phase === "first" && cap) parts.push(`${cap.frames} frames / ${cap.span_ms} ms${cap.before_prompt != null ? `, ${cap.before_prompt} before prompt` : ", no prompt"}`);
+  if (st?.challenge != null) parts.push(`action check ${st.challenge} ms`);
   if (d?.first_pass_server_ms != null && phase === "first") parts.push(`server ${d.first_pass_server_ms} ms`);
   return parts.join(" · ");
 }
@@ -714,7 +762,12 @@ function evidenceFor(d, phase, kind) {
   // schedule codes it returns after a challenge only once biometrics passed (api/decide.py).
   // Failed: CHALLENGE_FAILED / a challenge-phase TIMEOUT.
   const passedThenSchedule = phase === "final" && (rc === "SCHEDULE_APPROVAL_REQUIRED" || rc === "SCHEDULE_UNKNOWN");
-  const challenge = ((d?.decision === "ALLOW" && rc === "OK_LIVE_MATCH") || passedThenSchedule) ? ["ok", "completed"]
+  // v4 first pass returns signals.challenge {action, status}: that is used directly.
+  const quick = phase === "first" ? d?.signals?.challenge?.status : undefined;
+  const challenge = quick === "PASS" ? ["ok", "completed"]
+    : quick === "FAIL" ? ["bad", "failed"]
+    : quick ? ["na", "required"]
+    : ((d?.decision === "ALLOW" && rc === "OK_LIVE_MATCH" && phase === "final") || passedThenSchedule) ? ["ok", "completed"]
     : (phase === "final" && (rc === "CHALLENGE_FAILED" || rc === "TIMEOUT")) ? ["bad", "failed"]
     : ["na", "required"];
 
@@ -880,14 +933,17 @@ async function refreshStatus() {
   try { st = await api.status(); } catch (e) { err = e; }
   if (seq !== state.statusSeq) return;   // a newer poll already answered
   const m = st?.mode;
-  const passiveOn = st?.passive_allow_enabled === true;
+  // v4 /status fields, shown as returned; older servers fall back to the v3 fields.
+  const passive = st?.passive_allow || "\u2014";
+  const idSvc = st?.identity_service || (m === "ONLINE" ? "available" : m === "OFFLINE" ? "unavailable" : "unknown");
+  const pol = st?.policy || { status: st?.policy_version ? "current" : "missing", version: st?.policy_version };
+  const aq = st?.audit_queue || { pending: st?.pending_sync, synced: st?.synced };
   const rows = st ? [
-    // Not in /status today: pinned off in api/config.py after the passive calibration gate (NO-GO, 14 Nov).
-    ["Passive-only approval", passiveOn ? "ENABLED" : "DISABLED: calibration gate failed", passiveOn ? "ok" : "bad"],
-    ["Interactive challenge", "REQUIRED", "na"],
-    ["Identity service", m === "ONLINE" ? "available" : m === "OFFLINE" ? "unavailable" : "unknown", m === "ONLINE" ? "ok" : "bad"],
-    ["Campus policy", st.policy_version ? `loaded \u00b7 ${st.policy_version}` : "not loaded", st.policy_version ? "ok" : "bad"],
-    ["Audit queue", `${st.pending_sync ?? "?"} pending \u00b7 ${st.synced ?? "?"} synced`, st.pending_sync ? "na" : "ok"],
+    ["Passive-only approval", passive, String(passive).startsWith("ENABLED") ? "ok" : "bad"],
+    ["Interactive challenge", st.challenge || "\u2014", "na"],
+    ["Identity service", idSvc, idSvc === "available" ? "ok" : "bad"],
+    ["Campus policy", `${pol.status || "?"}${pol.version ? ` \u00b7 ${pol.version}` : ""}`, pol.status === "current" ? "ok" : "bad"],
+    ["Audit queue", `${aq.pending ?? "?"} pending \u00b7 ${aq.synced ?? "?"} synced`, aq.pending ? "na" : "ok"],
     ["Mode", m || "unknown", m === "ONLINE" ? "ok" : "bad"],
     ["Demo clock", `${st.demo_clock ? "ON" : "off"} \u00b7 ${st.kiosk_time || "?"}`, st.demo_clock ? "na" : "ok"],
   ] : [["Status", "unreachable", "bad"]];
